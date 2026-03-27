@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from queue import Empty, Queue
 from typing import Any
 
@@ -119,6 +120,24 @@ class CarlaSensorSuite:
             if payload is not None:
                 payloads[name] = payload
         ego_transform = self.backend.state.ego_actor.get_transform()
+        ego_velocity = self.backend.state.ego_actor.get_velocity()
+        ego_acceleration = self.backend.state.ego_actor.get_acceleration()
+        ego_speed_mps = math.sqrt(
+            (ego_velocity.x ** 2) + (ego_velocity.y ** 2) + (ego_velocity.z ** 2)
+        )
+        ego_acceleration_mps2 = math.sqrt(
+            (ego_acceleration.x ** 2) + (ego_acceleration.y ** 2) + (ego_acceleration.z ** 2)
+        )
+        lane_waypoint = self.backend.state.world.get_map().get_waypoint(
+            ego_transform.location,
+            project_to_road=True,
+            lane_type=self.backend.state.carla.LaneType.Driving,
+        )
+        lane_id = "lane_001"
+        if lane_waypoint is not None:
+            lane_id = (
+                f"road_{lane_waypoint.road_id}:section_{lane_waypoint.section_id}:lane_{lane_waypoint.lane_id}"
+            )
         snapshot = self.backend.state.current_snapshot
         snapshot_time = sim_time_s
         if snapshot is not None:
@@ -137,7 +156,14 @@ class CarlaSensorSuite:
             semantic_camera=self._camera_frame("semantic_camera", payloads["semantic_camera"])
             if "semantic_camera" in payloads
             else None,
-            metadata={"synthetic": False, "carla_frame": frame_id},
+            metadata={
+                "synthetic": False,
+                "carla_frame": frame_id,
+                "ego_yaw_rad": math.radians(float(ego_transform.rotation.yaw)),
+                "ego_speed_mps": float(ego_speed_mps),
+                "ego_acceleration_mps2": float(ego_acceleration_mps2),
+                "ego_lane_id": lane_id,
+            },
         )
 
     def _await_frame(self, sensor_name: str, frame_id: int, required: bool):

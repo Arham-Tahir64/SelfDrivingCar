@@ -10,7 +10,7 @@ runtime:
 carla:
   host: 127.0.0.1
   port: 2000
-  timeout_s: 10.0
+  timeout_s: 30.0
   sync_fps: 20
   carla_root: C:\Users\Arham\Desktop\CARLA_0.9.16
   python_api_wheel: C:\Users\Arham\Desktop\CARLA_0.9.16\PythonAPI\carla\dist\carla-0.9.16-cp312-cp312-win_amd64.whl

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 
 from autonomy_demo.common.exceptions import CarlaRuntimeError
@@ -66,7 +67,24 @@ class CarlaSimulationBackend(StubSimulationBackend):
             self.runtime_config.carla_python_api_wheel,
         )
         try:
-            self.state.world = self.state.client.load_world(scenario.map_name)
+            current_world = self._wait_for_server_ready()
+            current_map_name = current_world.get_map().name.split("/")[-1]
+            if current_map_name == scenario.map_name:
+                self.logger.info(
+                    "Simulator already on requested map %s; reusing current world",
+                    scenario.map_name,
+                )
+                self.state.world = current_world
+            else:
+                load_timeout_s = max(float(self.runtime_config.carla_timeout_s), 60.0)
+                self.logger.info(
+                    "Loading CARLA world %s with timeout %.1f s",
+                    scenario.map_name,
+                    load_timeout_s,
+                )
+                self.state.client.set_timeout(load_timeout_s)
+                self.state.world = self.state.client.load_world(scenario.map_name)
+                self.state.client.set_timeout(self.runtime_config.carla_timeout_s)
         except RuntimeError as exc:
             raise CarlaRuntimeError(
                 f"Failed to connect/load CARLA world '{scenario.map_name}'. "
@@ -84,6 +102,7 @@ class CarlaSimulationBackend(StubSimulationBackend):
             weather_from_name(self.state.carla, self.runtime_config.weather_preset)
         )
         self._spawn_ego_actor(scenario)
+        self._attach_collision_sensor()
         self._spawn_scenario_actors(scenario)
         self.logger.info(
             "Spawned ego=%s npcs=%s props=%s on map %s",
@@ -92,6 +111,38 @@ class CarlaSimulationBackend(StubSimulationBackend):
             len(self.state.prop_actors),
             scenario.map_name,
         )
+
+    def _wait_for_server_ready(self):
+        startup_wait_s = max(float(self.runtime_config.carla_timeout_s), 90.0)
+        rpc_timeout_s = min(float(self.runtime_config.carla_timeout_s), 5.0)
+        deadline = time.monotonic() + startup_wait_s
+        attempt = 0
+        last_error: RuntimeError | None = None
+        while time.monotonic() < deadline:
+            attempt += 1
+            try:
+                self.state.client.set_timeout(rpc_timeout_s)
+                world = self.state.client.get_world()
+                self.state.client.set_timeout(self.runtime_config.carla_timeout_s)
+                self.logger.info(
+                    "CARLA server became ready after %s attempt(s)",
+                    attempt,
+                )
+                return world
+            except RuntimeError as exc:
+                last_error = exc
+                remaining_s = max(0.0, deadline - time.monotonic())
+                self.logger.info(
+                    "Waiting for CARLA server readiness (attempt %s, %.0f s remaining): %s",
+                    attempt,
+                    remaining_s,
+                    exc,
+                )
+                time.sleep(2.0)
+        self.state.client.set_timeout(self.runtime_config.carla_timeout_s)
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("CARLA server did not become ready before the startup timeout expired.")
 
     def _spawn_ego_actor(self, scenario) -> None:
         blueprint = self.state.blueprint_library.find(self.runtime_config.ego_vehicle_blueprint)
@@ -109,6 +160,34 @@ class CarlaSimulationBackend(StubSimulationBackend):
             )
         self.state.ego_actor = actor
         self._update_spectator_view()
+
+    def _attach_collision_sensor(self) -> None:
+        if self.state.ego_actor is None:
+            raise CarlaRuntimeError("Cannot attach collision sensor before the ego actor exists.")
+        blueprint = self.state.blueprint_library.find("sensor.other.collision")
+        sensor = self.state.world.spawn_actor(
+            blueprint,
+            self.state.carla.Transform(),
+            attach_to=self.state.ego_actor,
+        )
+
+        def _on_collision(event) -> None:
+            impulse = getattr(event, "normal_impulse", None)
+            impulse_magnitude = 0.0
+            if impulse is not None:
+                impulse_magnitude = float(
+                    (impulse.x ** 2 + impulse.y ** 2 + impulse.z ** 2) ** 0.5
+                )
+            self.state.collision_events.append(
+                {
+                    "frame": int(getattr(event, "frame", -1)),
+                    "other_actor_id": int(getattr(getattr(event, "other_actor", None), "id", -1)),
+                    "impulse": impulse_magnitude,
+                }
+            )
+
+        sensor.listen(_on_collision)
+        self.state.sensor_actors["collision_sensor"] = sensor
 
     def _spawn_scenario_actors(self, scenario) -> None:
         for npc in scenario.npcs:

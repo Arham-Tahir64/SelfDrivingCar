@@ -41,6 +41,10 @@ class PipelineRuntime:
             self.simulation.attach_sensors()
             self.sensors.setup()
             self.sensors.warmup(self.simulation)
+            if hasattr(self.motion_planner, "prepare_route"):
+                self.motion_planner.prepare_route(self.simulation, scenario)
+            if hasattr(self.evaluation, "set_route_plan"):
+                self.evaluation.set_route_plan(getattr(self.motion_planner, "route_plan", None))
             if self.visualization:
                 self.visualization.attach(self.context.event_bus)
             for tick_id in range(max_ticks):

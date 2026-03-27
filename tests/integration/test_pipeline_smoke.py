@@ -18,3 +18,4 @@ def test_pipeline_smoke(tmp_path: Path) -> None:
     assert result.replay_path is not None
     assert result.replay_path.exists()
     assert result.evaluation_path.exists()
+    assert result.metadata_path.exists()

@@ -206,6 +206,29 @@ class Waypoint:
 
 
 @dataclass(slots=True)
+class RouteWaypoint:
+    x: float
+    y: float
+    z: float
+    yaw: float
+    cumulative_distance_m: float
+    target_speed_mps: float
+
+
+@dataclass(slots=True)
+class RoutePlan:
+    waypoints: list[RouteWaypoint]
+    goal_xyz: FloatArray
+    total_distance_m: float
+    goal_tolerance_m: float = 5.0
+
+    def __post_init__(self) -> None:
+        self.goal_xyz = _float_array(self.goal_xyz, (3,))
+        if self.total_distance_m < 0.0:
+            raise ValueError("total_distance_m must be non-negative")
+
+
+@dataclass(slots=True)
 class AgentPrediction:
     track_id: int
     object_class: ObjectClass
@@ -319,6 +342,11 @@ class EvaluationSummary:
     red_light_violations: int
     pedestrian_clearance_min_m: float
     latency_ms: dict[str, float]
+    distance_traveled_m: float = 0.0
+    goal_reached: bool = False
+    sim_duration_s: float = 0.0
+    mean_speed_mps: float = 0.0
+    max_speed_mps: float = 0.0
     notes: list[str] = field(default_factory=list)
 
 
