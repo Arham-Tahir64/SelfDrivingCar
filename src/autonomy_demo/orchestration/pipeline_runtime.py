@@ -41,6 +41,12 @@ class PipelineRuntime:
             self.simulation.attach_sensors()
             self.sensors.setup()
             self.sensors.warmup(self.simulation)
+            if hasattr(self.localization, "prepare"):
+                self.localization.prepare(self.simulation, scenario)
+            if hasattr(self.mapping, "prepare"):
+                self.mapping.prepare(self.simulation, scenario)
+            if hasattr(self.prediction, "prepare"):
+                self.prediction.prepare(self.simulation, scenario)
             if hasattr(self.motion_planner, "prepare_route"):
                 self.motion_planner.prepare_route(self.simulation, scenario)
             if hasattr(self.evaluation, "set_route_plan"):

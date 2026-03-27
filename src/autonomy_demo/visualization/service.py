@@ -9,7 +9,7 @@ import numpy as np
 from autonomy_demo.common.logging import get_logger
 from autonomy_demo.common.paths import ensure_directory
 from autonomy_demo.interfaces.enums import TopicName
-from autonomy_demo.interfaces.types import CameraFrame, DrivableSpaceMask, LaneLine, ObjectDetection, TrafficLightDetection
+from autonomy_demo.interfaces.types import CameraFrame, DrivableSpaceMask, EgoPose, LaneLine, ObjectDetection, TrafficLightDetection
 
 
 class NullVisualizationService:
@@ -25,6 +25,7 @@ class NullVisualizationService:
         self._latest_lanes: list[LaneLine] = []
         self._latest_traffic_lights: list[TrafficLightDetection] = []
         self._latest_drivable: DrivableSpaceMask | None = None
+        self._latest_ego_pose: EgoPose | None = None
         self._latest_overlay: np.ndarray | None = None
 
     def attach(self, event_bus) -> None:
@@ -45,6 +46,8 @@ class NullVisualizationService:
             self._latest_traffic_lights = [item for item in payload if isinstance(item, TrafficLightDetection)]
         elif topic == TopicName.PERCEPTION_DRIVABLE_SPACE.value and isinstance(payload, DrivableSpaceMask):
             self._latest_drivable = payload
+        elif topic == TopicName.LOCALIZATION_EGO_POSE.value and isinstance(payload, EgoPose):
+            self._latest_ego_pose = payload
         elif topic == TopicName.CONTROL_VEHICLE_COMMAND.value:
             self._latest_overlay = self._render_overlay()
 
@@ -96,6 +99,24 @@ class NullVisualizationService:
                 "GREEN": (0, 255, 0),
             }.get(traffic_light.state.value, (255, 255, 255))
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+        if self._latest_ego_pose is not None:
+            overlay_lines = [
+                f"lane: {self._latest_ego_pose.current_lane_id}",
+                f"s: {self._latest_ego_pose.frenet_s:.1f} m",
+                f"d: {self._latest_ego_pose.frenet_d:.2f} m",
+                f"heading err: {self._latest_ego_pose.heading_error_rad:.2f} rad",
+            ]
+            for index, text in enumerate(overlay_lines):
+                cv2.putText(
+                    frame,
+                    text,
+                    (16, 24 + (index * 20)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.55,
+                    (255, 255, 255),
+                    1,
+                    cv2.LINE_AA,
+                )
         try:
             cv2.imshow("autonomy_demo/perception", frame[:, :, ::-1])
             cv2.waitKey(1)

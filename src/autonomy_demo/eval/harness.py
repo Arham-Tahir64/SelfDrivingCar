@@ -93,6 +93,11 @@ class LiveEvaluationHarness:
         self.perception_ticks = 0
         self.previous_track_ids: set[int] = set()
         self.track_continuity_sum = 0.0
+        self.valid_lane_ticks = 0
+        self.abs_lateral_offset_sum = 0.0
+        self.route_progress_alignment_offset: float | None = None
+        self.route_progress_error_sum = 0.0
+        self.route_progress_error_samples = 0
 
     def set_route_plan(self, route_plan: RoutePlan | None) -> None:
         self.route_plan = route_plan
@@ -129,6 +134,16 @@ class LiveEvaluationHarness:
             self.distance_traveled_m += distance_xyz(self.previous_position, position)
         self.previous_position = position
         self.last_position = position
+        if ego_pose.current_lane_id:
+            self.valid_lane_ticks += 1
+        self.abs_lateral_offset_sum += abs(float(ego_pose.frenet_d))
+        if self.route_plan is not None and self.route_plan.total_distance_m > 0.0:
+            route_progress = route_progress_distance(self.route_plan, position)
+            if self.route_progress_alignment_offset is None:
+                self.route_progress_alignment_offset = route_progress - float(ego_pose.frenet_s)
+            aligned_progress = float(ego_pose.frenet_s) + float(self.route_progress_alignment_offset)
+            self.route_progress_error_sum += abs(route_progress - aligned_progress)
+            self.route_progress_error_samples += 1
         self.speed_sum_mps += float(ego_pose.speed_mps)
         self.speed_samples += 1
         self.max_speed_mps = max(self.max_speed_mps, float(ego_pose.speed_mps))
@@ -177,6 +192,15 @@ class LiveEvaluationHarness:
         drivable_output_ratio = (
             self.ticks_with_drivable / self.perception_ticks if self.perception_ticks else 0.0
         )
+        valid_lane_ratio = self.valid_lane_ticks / self.tick_count if self.tick_count else 0.0
+        mean_abs_lateral_offset_m = (
+            self.abs_lateral_offset_sum / self.tick_count if self.tick_count else 0.0
+        )
+        mean_route_progress_error_m = (
+            self.route_progress_error_sum / self.route_progress_error_samples
+            if self.route_progress_error_samples
+            else 0.0
+        )
         success = (
             completion_rate >= self.scenario.eval.min_completion_rate
             and collision_count <= self.scenario.eval.max_collisions
@@ -188,6 +212,9 @@ class LiveEvaluationHarness:
             f"Perception track continuity ratio: {track_continuity_ratio:.2f}",
             f"Perception lane output ratio: {lane_output_ratio:.2f}",
             f"Perception drivable output ratio: {drivable_output_ratio:.2f}",
+            f"Localization valid lane ratio: {valid_lane_ratio:.2f}",
+            f"Localization mean |d|: {mean_abs_lateral_offset_m:.2f} m",
+            f"Localization/route progress mean error: {mean_route_progress_error_m:.2f} m",
         ]
         self.final_summary = EvaluationSummary(
             scenario_id=self.scenario.scenario_id,

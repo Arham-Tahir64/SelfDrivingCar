@@ -197,9 +197,20 @@ class StaticLaneSegment:
     lane_id: str
     centerline_world: FloatArray
     speed_limit_mps: float
+    left_boundary_world: FloatArray = field(
+        default_factory=lambda: np.zeros((0, 3), dtype=np.float32)
+    )
+    right_boundary_world: FloatArray = field(
+        default_factory=lambda: np.zeros((0, 3), dtype=np.float32)
+    )
+    predecessor_lane_ids: list[str] = field(default_factory=list)
+    successor_lane_ids: list[str] = field(default_factory=list)
+    is_junction: bool = False
 
     def __post_init__(self) -> None:
         self.centerline_world = _float_array(self.centerline_world)
+        self.left_boundary_world = _float_array(self.left_boundary_world)
+        self.right_boundary_world = _float_array(self.right_boundary_world)
 
 
 @dataclass(slots=True)

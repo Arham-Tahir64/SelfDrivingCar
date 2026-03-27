@@ -13,15 +13,16 @@ from autonomy_demo.common.paths import ensure_directory
 from autonomy_demo.control.controller import RouteFollowerController, StubController
 from autonomy_demo.eval.harness import LiveEvaluationHarness, SimpleEvaluationHarness
 from autonomy_demo.interfaces.contracts import RuntimeContext
-from autonomy_demo.localization.module import StubLocalizationModule
-from autonomy_demo.mapping.module import StubMappingModule
+from autonomy_demo.localization.module import build_localization_module
+from autonomy_demo.mapping.lane_graph import LaneGraphProvider
+from autonomy_demo.mapping.module import build_mapping_module
 from autonomy_demo.orchestration.event_bus import InProcessEventBus
 from autonomy_demo.orchestration.pipeline_runtime import PipelineRuntime
 from autonomy_demo.perception.module import build_perception_module
 from autonomy_demo.planning.behavior_fsm import StubBehaviorPlanner
 from autonomy_demo.planning.motion_planner import StubMotionPlanner
 from autonomy_demo.planning.route_following import RouteFollowerMotionPlanner
-from autonomy_demo.prediction.module import StubPredictionModule
+from autonomy_demo.prediction.module import build_prediction_module
 from autonomy_demo.replay.writer import Hdf5OrJsonReplayWriter
 from autonomy_demo.sensors.carla_sensor_suite import CarlaSensorSuite
 from autonomy_demo.sensors.sensor_manager import SensorManager
@@ -113,6 +114,10 @@ class ScenarioRunner:
         replay_writer = Hdf5OrJsonReplayWriter(self.output_dir) if record else None
         visualization = NullVisualizationService(enabled=visualize, output_dir=self.output_dir)
         perception = build_perception_module(self.runtime_config)
+        lane_graph_provider = LaneGraphProvider()
+        localization = build_localization_module(self.runtime_config, lane_graph_provider)
+        mapping = build_mapping_module(self.runtime_config, lane_graph_provider)
+        prediction = build_prediction_module(self.runtime_config)
         if self.runtime_config.backend == "carla":
             motion_planner = RouteFollowerMotionPlanner()
             controller = RouteFollowerController()
@@ -130,9 +135,9 @@ class ScenarioRunner:
             simulation=backend,
             sensors=sensors,
             perception=perception,
-            localization=StubLocalizationModule(),
-            mapping=StubMappingModule(),
-            prediction=StubPredictionModule(),
+            localization=localization,
+            mapping=mapping,
+            prediction=prediction,
             behavior_planner=StubBehaviorPlanner(),
             motion_planner=motion_planner,
             controller=controller,

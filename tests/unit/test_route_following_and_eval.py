@@ -120,3 +120,4 @@ def test_live_evaluation_reports_distance_and_goal_reach() -> None:
     assert summary.distance_traveled_m > 0.0
     assert summary.goal_reached is True
     assert summary.completion_rate == 1.0
+    assert any("Localization valid lane ratio" in note for note in summary.notes)
