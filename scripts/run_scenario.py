@@ -19,6 +19,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--app-config", default="configs/app.default.yaml")
     parser.add_argument("--sensor-config", default="configs/sensors.default.yaml")
     parser.add_argument("--backend", choices=["stub", "carla"], default=None)
+    parser.add_argument("--max-ticks", type=int, default=None)
     parser.add_argument("--visualize", action="store_true")
     parser.add_argument("--record", action="store_true")
     parser.add_argument("--validate", action="store_true")
@@ -31,6 +32,8 @@ def main() -> int:
     runtime_config = load_runtime_config(Path(args.app_config))
     if args.backend:
         runtime_config.backend = args.backend
+    if args.max_ticks is not None:
+        runtime_config.max_ticks = args.max_ticks
     if args.visualize:
         runtime_config.enable_visualization = True
     if args.record:

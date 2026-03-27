@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
+from autonomy_demo.common.logging import get_logger
 from autonomy_demo.common.paths import ensure_directory
 from autonomy_demo.control.controller import StubController
 from autonomy_demo.eval.harness import SimpleEvaluationHarness
@@ -33,6 +35,7 @@ class ScenarioRunner:
         self.runtime_config = runtime_config
         self.sensor_config = sensor_config
         self.output_dir = ensure_directory(output_dir)
+        self.logger = get_logger(__name__)
 
     def _build_runtime_components(self):
         if self.runtime_config.backend == "carla":
@@ -45,6 +48,15 @@ class ScenarioRunner:
 
     def run(self, scenario, visualize: bool, record: bool) -> ScenarioRunResult:
         backend, sensors = self._build_runtime_components()
+        max_ticks = self.runtime_config.max_ticks
+        if max_ticks <= 0:
+            max_ticks = max(1, math.ceil(scenario.max_duration_s * self.runtime_config.tick_hz))
+        self.logger.info(
+            "Running scenario %s for %s ticks at %s Hz",
+            scenario.scenario_id,
+            max_ticks,
+            self.runtime_config.tick_hz,
+        )
         bus = InProcessEventBus()
         context = RuntimeContext(
             event_bus=bus,
@@ -71,7 +83,7 @@ class ScenarioRunner:
             visualization=visualization,
             evaluation=evaluation,
         )
-        pipeline.run(scenario=scenario, max_ticks=self.runtime_config.max_ticks)
+        pipeline.run(scenario=scenario, max_ticks=max_ticks)
         replay_path = replay_writer.finalize() if replay_writer else None
         evaluation_path = evaluation.write_summary(self.output_dir)
         return ScenarioRunResult(replay_path=replay_path, evaluation_path=evaluation_path)

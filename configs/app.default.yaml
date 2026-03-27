@@ -1,7 +1,7 @@
 runtime:
   backend: stub
   tick_hz: 20
-  max_ticks: 5
+  max_ticks: 0
   output_dir: outputs
   log_level: INFO
   record_replay: true

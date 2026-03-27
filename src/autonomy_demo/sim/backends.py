@@ -95,13 +95,12 @@ class CarlaSimulationBackend(StubSimulationBackend):
 
     def _spawn_ego_actor(self, scenario) -> None:
         blueprint = self.state.blueprint_library.find(self.runtime_config.ego_vehicle_blueprint)
-        transform = self.state.carla.Transform(
-            self.state.carla.Location(
-                x=float(scenario.ego_spawn.x),
-                y=float(scenario.ego_spawn.y),
-                z=float(scenario.ego_spawn.z),
-            ),
-            self.state.carla.Rotation(yaw=float(scenario.ego_spawn.yaw)),
+        transform = self._resolve_vehicle_spawn_transform(
+            x=float(scenario.ego_spawn.x),
+            y=float(scenario.ego_spawn.y),
+            z=float(scenario.ego_spawn.z),
+            yaw=float(scenario.ego_spawn.yaw),
+            actor_label="ego",
         )
         actor = self.state.world.try_spawn_actor(blueprint, transform)
         if actor is None:
@@ -109,16 +108,16 @@ class CarlaSimulationBackend(StubSimulationBackend):
                 f"Unable to spawn ego vehicle with blueprint {self.runtime_config.ego_vehicle_blueprint}"
             )
         self.state.ego_actor = actor
+        self._update_spectator_view()
 
     def _spawn_scenario_actors(self, scenario) -> None:
         for npc in scenario.npcs:
-            transform = self.state.carla.Transform(
-                self.state.carla.Location(
-                    x=float(npc.spawn.x),
-                    y=float(npc.spawn.y),
-                    z=float(npc.spawn.z),
-                ),
-                self.state.carla.Rotation(yaw=float(npc.spawn.yaw)),
+            transform = self._resolve_vehicle_spawn_transform(
+                x=float(npc.spawn.x),
+                y=float(npc.spawn.y),
+                z=float(npc.spawn.z),
+                yaw=float(npc.spawn.yaw),
+                actor_label=f"npc:{npc.model}",
             )
             try:
                 blueprint = self.state.blueprint_library.find(npc.model)
@@ -128,6 +127,12 @@ class CarlaSimulationBackend(StubSimulationBackend):
             actor = self.state.world.try_spawn_actor(blueprint, transform)
             if actor is not None:
                 self.state.npc_actors.append(actor)
+            else:
+                self.logger.warning(
+                    "Failed to spawn NPC %s at resolved transform %s",
+                    npc.model,
+                    transform,
+                )
         for prop in scenario.props:
             blueprint_id = prop.type
             if "." not in blueprint_id:
@@ -144,6 +149,71 @@ class CarlaSimulationBackend(StubSimulationBackend):
             if actor is not None:
                 self.state.prop_actors.append(actor)
 
+    def _resolve_vehicle_spawn_transform(
+        self,
+        *,
+        x: float,
+        y: float,
+        z: float,
+        yaw: float,
+        actor_label: str,
+    ):
+        carla = self.state.carla
+        requested_location = carla.Location(x=x, y=y, z=z)
+        road_waypoint = self.state.world.get_map().get_waypoint(
+            requested_location,
+            project_to_road=True,
+            lane_type=carla.LaneType.Driving,
+        )
+        if road_waypoint is not None:
+            resolved = road_waypoint.transform
+            resolved.location.z += 0.5
+            if abs(yaw) > 1e-3:
+                resolved.rotation.yaw = yaw
+            self.logger.info(
+                "Resolved %s spawn from (%s, %s, %s, yaw=%s) to road waypoint (%s, %s, %s, yaw=%s)",
+                actor_label,
+                x,
+                y,
+                z,
+                yaw,
+                round(resolved.location.x, 2),
+                round(resolved.location.y, 2),
+                round(resolved.location.z, 2),
+                round(resolved.rotation.yaw, 2),
+            )
+            return resolved
+
+        spawn_points = self.state.world.get_map().get_spawn_points()
+        if spawn_points:
+            fallback = min(
+                spawn_points,
+                key=lambda transform: (
+                    (transform.location.x - x) ** 2 + (transform.location.y - y) ** 2
+                ),
+            )
+            fallback.location.z += 0.5
+            if abs(yaw) > 1e-3:
+                fallback.rotation.yaw = yaw
+            self.logger.warning(
+                "Could not project %s spawn to a driving lane; using nearest spawn point (%s, %s, %s, yaw=%s)",
+                actor_label,
+                round(fallback.location.x, 2),
+                round(fallback.location.y, 2),
+                round(fallback.location.z, 2),
+                round(fallback.rotation.yaw, 2),
+            )
+            return fallback
+
+        self.logger.warning(
+            "No valid road waypoint or map spawn point found for %s; falling back to raw transform",
+            actor_label,
+        )
+        return carla.Transform(
+            carla.Location(x=x, y=y, z=z + 0.5),
+            carla.Rotation(yaw=yaw),
+        )
+
     def attach_sensors(self) -> None:
         if self.state.ego_actor is None:
             raise CarlaRuntimeError("Cannot attach sensors before the ego actor exists.")
@@ -156,7 +226,29 @@ class CarlaSimulationBackend(StubSimulationBackend):
         self.state.current_frame = self.current_frame
         self.current_snapshot = self.state.world.get_snapshot()
         self.state.current_snapshot = self.current_snapshot
+        self._update_spectator_view()
         self.logger.debug("CARLA world tick %s -> frame %s", tick_id, self.current_frame)
+
+    def _update_spectator_view(self) -> None:
+        if self.state.world is None or self.state.ego_actor is None:
+            return
+        ego_transform = self.state.ego_actor.get_transform()
+        rotation = ego_transform.rotation
+        forward = ego_transform.get_forward_vector()
+        spectator_location = self.state.carla.Location(
+            x=ego_transform.location.x - forward.x * 12.0,
+            y=ego_transform.location.y - forward.y * 12.0,
+            z=ego_transform.location.z + 6.0,
+        )
+        spectator_rotation = self.state.carla.Rotation(
+            pitch=-20.0,
+            yaw=rotation.yaw,
+            roll=0.0,
+        )
+        spectator = self.state.world.get_spectator()
+        spectator.set_transform(
+            self.state.carla.Transform(spectator_location, spectator_rotation)
+        )
 
     def apply_control(self, command) -> None:
         if self.state.ego_actor is None:
