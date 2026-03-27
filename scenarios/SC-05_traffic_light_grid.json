@@ -1,0 +1,17 @@
+{
+  "scenario_id": "SC-05",
+  "name": "Traffic Light Grid",
+  "map": "Town10HD",
+  "ego_spawn": { "x": -30.0, "y": 0.0, "yaw": 0.0 },
+  "ego_goal": { "x": 80.0, "y": 0.0 },
+  "max_duration_s": 120,
+  "npcs": [],
+  "props": [],
+  "triggers": [{ "type": "traffic_light", "at_s": 25.0 }],
+  "eval": {
+    "min_completion_rate": 0.85,
+    "max_collisions": 0,
+    "max_red_light_violations": 0
+  }
+}
+

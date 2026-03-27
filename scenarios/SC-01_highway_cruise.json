@@ -1,0 +1,20 @@
+{
+  "scenario_id": "SC-01",
+  "name": "Highway Cruise",
+  "map": "Town04",
+  "ego_spawn": { "x": 100.0, "y": 50.0, "yaw": 0.0 },
+  "ego_goal": { "x": 300.0, "y": 50.0 },
+  "max_duration_s": 120,
+  "npcs": [
+    {
+      "model": "vehicle.tesla.model3",
+      "behavior": "cruise",
+      "spawn": { "x": 140.0, "y": 52.0, "yaw": 0.0 },
+      "route": [{ "x": 320.0, "y": 52.0 }]
+    }
+  ],
+  "props": [],
+  "triggers": [],
+  "eval": { "min_completion_rate": 0.85, "max_collisions": 0 }
+}
+

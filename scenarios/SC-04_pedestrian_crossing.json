@@ -1,0 +1,17 @@
+{
+  "scenario_id": "SC-04",
+  "name": "Pedestrian Crossing",
+  "map": "Town05",
+  "ego_spawn": { "x": 10.0, "y": 5.0, "yaw": 0.0 },
+  "ego_goal": { "x": 110.0, "y": 5.0 },
+  "max_duration_s": 90,
+  "npcs": [],
+  "props": [],
+  "triggers": [{ "type": "pedestrian_crossing", "at_s": 45.0 }],
+  "eval": {
+    "min_completion_rate": 0.85,
+    "max_collisions": 0,
+    "min_pedestrian_clearance_m": 2.0
+  }
+}
+

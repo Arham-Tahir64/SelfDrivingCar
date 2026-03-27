@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AutonomyDemoScenario",
+  "type": "object",
+  "required": [
+    "scenario_id",
+    "name",
+    "map",
+    "ego_spawn",
+    "ego_goal",
+    "max_duration_s",
+    "npcs",
+    "props",
+    "triggers",
+    "eval"
+  ],
+  "properties": {
+    "scenario_id": { "type": "string" },
+    "name": { "type": "string" },
+    "map": { "type": "string" },
+    "ego_spawn": { "$ref": "#/$defs/pose" },
+    "ego_goal": { "$ref": "#/$defs/point" },
+    "max_duration_s": { "type": "number", "exclusiveMinimum": 0 },
+    "npcs": { "type": "array", "items": { "$ref": "#/$defs/npc" } },
+    "props": { "type": "array", "items": { "$ref": "#/$defs/prop" } },
+    "triggers": { "type": "array", "items": { "$ref": "#/$defs/trigger" } },
+    "eval": { "$ref": "#/$defs/eval" }
+  },
+  "$defs": {
+    "point": {
+      "type": "object",
+      "required": ["x", "y"],
+      "properties": {
+        "x": { "type": "number" },
+        "y": { "type": "number" },
+        "z": { "type": "number" }
+      },
+      "additionalProperties": true
+    },
+    "pose": {
+      "type": "object",
+      "required": ["x", "y", "yaw"],
+      "properties": {
+        "x": { "type": "number" },
+        "y": { "type": "number" },
+        "z": { "type": "number" },
+        "yaw": { "type": "number" }
+      },
+      "additionalProperties": true
+    },
+    "npc": {
+      "type": "object",
+      "required": ["model", "behavior", "spawn"],
+      "properties": {
+        "model": { "type": "string" },
+        "behavior": { "type": "string" },
+        "spawn": { "$ref": "#/$defs/pose" },
+        "route": { "type": "array", "items": { "$ref": "#/$defs/point" } }
+      },
+      "additionalProperties": true
+    },
+    "prop": {
+      "type": "object",
+      "required": ["type", "x", "y"],
+      "properties": {
+        "type": { "type": "string" },
+        "x": { "type": "number" },
+        "y": { "type": "number" },
+        "z": { "type": "number" }
+      },
+      "additionalProperties": true
+    },
+    "trigger": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": { "type": "string" },
+        "at_s": { "type": "number" },
+        "lane_id": { "type": ["string", "integer"] }
+      },
+      "additionalProperties": true
+    },
+    "eval": {
+      "type": "object",
+      "required": ["min_completion_rate", "max_collisions"],
+      "properties": {
+        "min_completion_rate": { "type": "number" },
+        "max_collisions": { "type": "integer", "minimum": 0 },
+        "max_red_light_violations": { "type": "integer", "minimum": 0 },
+        "min_pedestrian_clearance_m": { "type": "number" }
+      },
+      "additionalProperties": true
+    }
+  }
+}
+

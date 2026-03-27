@@ -1,0 +1,22 @@
+runtime:
+  backend: stub
+  tick_hz: 20
+  max_ticks: 5
+  output_dir: outputs
+  log_level: INFO
+  record_replay: true
+  enable_visualization: true
+  weather_preset: ClearNoon
+carla:
+  host: 127.0.0.1
+  port: 2000
+  town: Town04
+evaluation:
+  latency_budget_ms:
+    perception: 60
+    localization: 5
+    mapping: 10
+    prediction: 15
+    planning: 20
+    control: 5
+

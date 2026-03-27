@@ -1,0 +1,24 @@
+{
+  "scenario_id": "SC-06",
+  "name": "Construction Zone",
+  "map": "Town04",
+  "ego_spawn": { "x": 100.0, "y": 50.0, "yaw": 0.0 },
+  "ego_goal": { "x": 300.0, "y": 52.0 },
+  "max_duration_s": 120,
+  "npcs": [
+    {
+      "model": "vehicle.tesla.model3",
+      "behavior": "cruise",
+      "spawn": { "x": 160.0, "y": 54.0, "yaw": 0.0 },
+      "route": [{ "x": 320.0, "y": 54.0 }]
+    }
+  ],
+  "props": [
+    { "type": "trafficcone01", "x": 180.0, "y": 48.0 },
+    { "type": "trafficcone01", "x": 184.0, "y": 48.0 },
+    { "type": "trafficcone01", "x": 188.0, "y": 48.0 }
+  ],
+  "triggers": [{ "type": "lane_closure", "at_s": 80.0, "lane_id": 1 }],
+  "eval": { "min_completion_rate": 0.9, "max_collisions": 0 }
+}
+
