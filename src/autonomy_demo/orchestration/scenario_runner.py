@@ -16,6 +16,7 @@ from autonomy_demo.planning.behavior_fsm import StubBehaviorPlanner
 from autonomy_demo.planning.motion_planner import StubMotionPlanner
 from autonomy_demo.prediction.module import StubPredictionModule
 from autonomy_demo.replay.writer import Hdf5OrJsonReplayWriter
+from autonomy_demo.sensors.carla_sensor_suite import CarlaSensorSuite
 from autonomy_demo.sensors.sensor_manager import SensorManager
 from autonomy_demo.sim.backends import CarlaSimulationBackend, StubSimulationBackend
 from autonomy_demo.visualization.service import NullVisualizationService
@@ -33,12 +34,17 @@ class ScenarioRunner:
         self.sensor_config = sensor_config
         self.output_dir = ensure_directory(output_dir)
 
-    def _build_backend(self):
+    def _build_runtime_components(self):
         if self.runtime_config.backend == "carla":
-            return CarlaSimulationBackend(self.runtime_config)
-        return StubSimulationBackend(self.runtime_config)
+            backend = CarlaSimulationBackend(self.runtime_config)
+            sensors = CarlaSensorSuite(self.sensor_config, backend)
+            return backend, sensors
+        backend = StubSimulationBackend(self.runtime_config)
+        sensors = SensorManager(self.sensor_config)
+        return backend, sensors
 
     def run(self, scenario, visualize: bool, record: bool) -> ScenarioRunResult:
+        backend, sensors = self._build_runtime_components()
         bus = InProcessEventBus()
         context = RuntimeContext(
             event_bus=bus,
@@ -52,8 +58,8 @@ class ScenarioRunner:
         evaluation = SimpleEvaluationHarness(scenario)
         pipeline = PipelineRuntime(
             context=context,
-            simulation=self._build_backend(),
-            sensors=SensorManager(self.sensor_config),
+            simulation=backend,
+            sensors=sensors,
             perception=StubPerceptionModule(),
             localization=StubLocalizationModule(),
             mapping=StubMappingModule(),
@@ -69,4 +75,3 @@ class ScenarioRunner:
         replay_path = replay_writer.finalize() if replay_writer else None
         evaluation_path = evaluation.write_summary(self.output_dir)
         return ScenarioRunResult(replay_path=replay_path, evaluation_path=evaluation_path)
-

@@ -9,3 +9,6 @@ class ConfigurationError(AutonomyDemoError):
 class ScenarioValidationError(AutonomyDemoError):
     """Raised when a scenario file fails schema validation."""
 
+
+class CarlaRuntimeError(AutonomyDemoError):
+    """Raised when the live CARLA runtime cannot be configured or reached."""

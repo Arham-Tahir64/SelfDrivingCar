@@ -1,6 +1,6 @@
 # autonomy_demo
 
-`autonomy_demo` is a replay-first autonomy research scaffold for CARLA 0.9.15. It mirrors the PRD pipeline:
+`autonomy_demo` is a replay-first autonomy research scaffold for CARLA 0.9.16. It mirrors the PRD pipeline:
 
 `sim -> sensors -> perception -> localization -> mapping -> prediction -> planning -> control`
 
@@ -39,7 +39,8 @@ python scripts/replay_scenario.py --replay outputs/latest/replay.json
 ## Design Constraints From The PRD
 
 - Simulation/research demo only, not a production AV system
-- CARLA 0.9.15 target
+- CARLA 0.9.16 target
+- Python 3.12 target for live CARLA integration
 - Python monorepo, no microservice split
 - Typed layer boundaries with no non-adjacent layer imports
 - Visualization remains decoupled and read-only
@@ -49,7 +50,6 @@ python scripts/replay_scenario.py --replay outputs/latest/replay.json
 ## Next Implementation Steps
 
 1. Replace the stub simulation backend with a real CARLA adapter.
-2. Implement sensor callbacks and synchronization on top of CARLA actor streams.
+2. Flesh out live sensor synchronization and multi-rate handling for slower side/rear cameras.
 3. Swap stub perception modules for YOLOv8, PointPillars, lane detection, and segmentation adapters.
 4. Add OpenDRIVE parsing, Frenet planning, Stanley/PID control, and a real dashboard renderer.
-

@@ -56,6 +56,12 @@ class SimulationBackend(Protocol):
 
 
 class SensorSuite(Protocol):
+    def setup(self) -> None:
+        ...
+
+    def warmup(self, simulation: SimulationBackend, warmup_ticks: int = 2) -> None:
+        ...
+
     def capture(self, tick_id: int, sim_time_s: float) -> SensorFrameBundle:
         ...
 

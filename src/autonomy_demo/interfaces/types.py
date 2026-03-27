@@ -31,6 +31,7 @@ class CameraFrame:
     sensor_id: str
     frame: FloatArray
     timestamp_s: float
+    frame_id: int | None = None
     status: SensorStatus = SensorStatus.OK
 
     def __post_init__(self) -> None:
@@ -42,6 +43,7 @@ class CameraFrame:
 class LidarFrame:
     points_xyz: FloatArray
     timestamp_s: float
+    frame_id: int | None = None
     intensity: FloatArray | None = None
 
     def __post_init__(self) -> None:
@@ -56,6 +58,7 @@ class LidarFrame:
 class RadarFrame:
     detections: FloatArray
     timestamp_s: float
+    frame_id: int | None = None
 
     def __post_init__(self) -> None:
         self.detections = _float_array(self.detections)
@@ -65,6 +68,7 @@ class RadarFrame:
 class GnssReading:
     world_xyz: FloatArray
     timestamp_s: float
+    frame_id: int | None = None
 
     def __post_init__(self) -> None:
         self.world_xyz = _float_array(self.world_xyz, (3,))
@@ -75,6 +79,7 @@ class ImuReading:
     acceleration_xyz: FloatArray
     gyro_xyz: FloatArray
     timestamp_s: float
+    frame_id: int | None = None
 
     def __post_init__(self) -> None:
         self.acceleration_xyz = _float_array(self.acceleration_xyz, (3,))
@@ -329,6 +334,11 @@ class RuntimeConfig:
     weather_preset: str
     carla_host: str
     carla_port: int
+    carla_timeout_s: float
+    carla_sync_fps: int
+    carla_root: Path
+    carla_python_api_wheel: Path
+    carla_launch_executable: Path
     town: str
+    ego_vehicle_blueprint: str
     latency_budget_ms: dict[str, float]
-

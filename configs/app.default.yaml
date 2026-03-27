@@ -10,7 +10,13 @@ runtime:
 carla:
   host: 127.0.0.1
   port: 2000
+  timeout_s: 10.0
+  sync_fps: 20
+  carla_root: C:\Users\Arham\Desktop\CARLA_0.9.16
+  python_api_wheel: C:\Users\Arham\Desktop\CARLA_0.9.16\PythonAPI\carla\dist\carla-0.9.16-cp312-cp312-win_amd64.whl
+  launch_executable: C:\Users\Arham\Desktop\CARLA_0.9.16\CarlaUE4.exe
   town: Town04
+  ego_vehicle_blueprint: vehicle.tesla.model3
 evaluation:
   latency_budget_ms:
     perception: 60
@@ -19,4 +25,3 @@ evaluation:
     prediction: 15
     planning: 20
     control: 5
-
