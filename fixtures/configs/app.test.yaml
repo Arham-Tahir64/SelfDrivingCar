@@ -17,6 +17,10 @@ carla:
   launch_executable: C:\Users\Arham\Desktop\CARLA_0.9.16\CarlaUE4.exe
   town: Town04
   ego_vehicle_blueprint: vehicle.tesla.model3
+perception:
+  mode: stub
+  device: cpu
+  model_variant: bootstrap
 evaluation:
   latency_budget_ms:
     perception: 60

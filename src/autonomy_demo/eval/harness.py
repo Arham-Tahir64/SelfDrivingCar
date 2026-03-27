@@ -10,7 +10,7 @@ import numpy as np
 from autonomy_demo.common.geometry import distance_xyz
 from autonomy_demo.common.logging import get_logger
 from autonomy_demo.interfaces.enums import TopicName
-from autonomy_demo.interfaces.types import EgoPose, EvaluationSummary, RoutePlan
+from autonomy_demo.interfaces.types import DrivableSpaceMask, EgoPose, EvaluationSummary, LaneLine, ObjectDetection, RoutePlan
 from autonomy_demo.planning.route_following import route_progress_distance
 
 
@@ -87,6 +87,12 @@ class LiveEvaluationHarness:
             dtype=np.float32,
         )
         self.goal_tolerance_m = 6.0
+        self.detection_count_sum = 0
+        self.ticks_with_lanes = 0
+        self.ticks_with_drivable = 0
+        self.perception_ticks = 0
+        self.previous_track_ids: set[int] = set()
+        self.track_continuity_sum = 0.0
 
     def set_route_plan(self, route_plan: RoutePlan | None) -> None:
         self.route_plan = route_plan
@@ -100,6 +106,24 @@ class LiveEvaluationHarness:
         ego_pose = snapshot.get(TopicName.LOCALIZATION_EGO_POSE.value)
         if not isinstance(ego_pose, EgoPose):
             return
+        detections = snapshot.get(TopicName.PERCEPTION_DETECTIONS.value, [])
+        lanes = snapshot.get(TopicName.PERCEPTION_LANES.value, [])
+        drivable = snapshot.get(TopicName.PERCEPTION_DRIVABLE_SPACE.value)
+        detection_track_ids = {
+            detection.track_id
+            for detection in detections
+            if isinstance(detection, ObjectDetection)
+        }
+        self.perception_ticks += 1
+        self.detection_count_sum += len(detection_track_ids)
+        if detection_track_ids and self.previous_track_ids:
+            overlap = len(detection_track_ids & self.previous_track_ids)
+            self.track_continuity_sum += overlap / max(len(self.previous_track_ids), 1)
+        self.previous_track_ids = detection_track_ids
+        if isinstance(lanes, list) and any(isinstance(lane, LaneLine) for lane in lanes):
+            self.ticks_with_lanes += 1
+        if isinstance(drivable, DrivableSpaceMask) and bool(np.any(drivable.mask)):
+            self.ticks_with_drivable += 1
         position = np.asarray(ego_pose.world_xyz, dtype=np.float32)
         if self.previous_position is not None:
             self.distance_traveled_m += distance_xyz(self.previous_position, position)
@@ -143,6 +167,16 @@ class LiveEvaluationHarness:
 
         collision_count = len(getattr(getattr(self.backend, "state", None), "collision_events", []))
         mean_speed_mps = self.speed_sum_mps / self.speed_samples if self.speed_samples else 0.0
+        avg_detection_count = self.detection_count_sum / self.perception_ticks if self.perception_ticks else 0.0
+        track_continuity_ratio = (
+            self.track_continuity_sum / max(self.perception_ticks - 1, 1)
+            if self.perception_ticks > 1
+            else 0.0
+        )
+        lane_output_ratio = self.ticks_with_lanes / self.perception_ticks if self.perception_ticks else 0.0
+        drivable_output_ratio = (
+            self.ticks_with_drivable / self.perception_ticks if self.perception_ticks else 0.0
+        )
         success = (
             completion_rate >= self.scenario.eval.min_completion_rate
             and collision_count <= self.scenario.eval.max_collisions
@@ -150,6 +184,10 @@ class LiveEvaluationHarness:
         notes = [
             "Live CARLA metrics enabled for distance, duration, speed, goal reach, and collisions.",
             "Red-light and pedestrian-clearance metrics remain placeholder until scenario-specific event logic lands.",
+            f"Perception avg detections/tick: {avg_detection_count:.2f}",
+            f"Perception track continuity ratio: {track_continuity_ratio:.2f}",
+            f"Perception lane output ratio: {lane_output_ratio:.2f}",
+            f"Perception drivable output ratio: {drivable_output_ratio:.2f}",
         ]
         self.final_summary = EvaluationSummary(
             scenario_id=self.scenario.scenario_id,

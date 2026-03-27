@@ -9,6 +9,8 @@ def test_load_runtime_config() -> None:
     assert config.max_ticks == 2
     assert config.carla_sync_fps == 20
     assert config.carla_python_api_wheel.name == "carla-0.9.16-cp312-cp312-win_amd64.whl"
+    assert config.perception_mode == "stub"
+    assert config.perception_model_variant == "bootstrap"
     assert config.latency_budget_ms["perception"] == 60.0
 
 

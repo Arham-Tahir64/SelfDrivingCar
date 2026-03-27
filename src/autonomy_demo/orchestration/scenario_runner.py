@@ -17,7 +17,7 @@ from autonomy_demo.localization.module import StubLocalizationModule
 from autonomy_demo.mapping.module import StubMappingModule
 from autonomy_demo.orchestration.event_bus import InProcessEventBus
 from autonomy_demo.orchestration.pipeline_runtime import PipelineRuntime
-from autonomy_demo.perception.module import StubPerceptionModule
+from autonomy_demo.perception.module import build_perception_module
 from autonomy_demo.planning.behavior_fsm import StubBehaviorPlanner
 from autonomy_demo.planning.motion_planner import StubMotionPlanner
 from autonomy_demo.planning.route_following import RouteFollowerMotionPlanner
@@ -111,7 +111,8 @@ class ScenarioRunner:
             latency_budget_ms=self.runtime_config.latency_budget_ms,
         )
         replay_writer = Hdf5OrJsonReplayWriter(self.output_dir) if record else None
-        visualization = NullVisualizationService(enabled=visualize)
+        visualization = NullVisualizationService(enabled=visualize, output_dir=self.output_dir)
+        perception = build_perception_module(self.runtime_config)
         if self.runtime_config.backend == "carla":
             motion_planner = RouteFollowerMotionPlanner()
             controller = RouteFollowerController()
@@ -128,7 +129,7 @@ class ScenarioRunner:
             context=context,
             simulation=backend,
             sensors=sensors,
-            perception=StubPerceptionModule(),
+            perception=perception,
             localization=StubLocalizationModule(),
             mapping=StubMappingModule(),
             prediction=StubPredictionModule(),

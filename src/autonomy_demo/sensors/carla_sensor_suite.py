@@ -8,6 +8,7 @@ import numpy as np
 
 from autonomy_demo.common.exceptions import CarlaRuntimeError
 from autonomy_demo.common.logging import get_logger
+from autonomy_demo.interfaces.enums import ObjectClass, TrafficLightState
 from autonomy_demo.interfaces.types import (
     CameraFrame,
     GnssReading,
@@ -163,8 +164,126 @@ class CarlaSensorSuite:
                 "ego_speed_mps": float(ego_speed_mps),
                 "ego_acceleration_mps2": float(ego_acceleration_mps2),
                 "ego_lane_id": lane_id,
+                "carla_actor_annotations": self._actor_annotations(payloads["front_camera"], ego_transform),
             },
         )
+
+    def _actor_annotations(self, front_camera, ego_transform) -> list[dict[str, Any]]:
+        annotations: list[dict[str, Any]] = []
+        image_width = int(front_camera.width)
+        image_height = int(front_camera.height)
+        fov_deg = float(self.sensor_config.get("front_camera", {}).get("fov_deg", 90.0))
+        ego_location = ego_transform.location
+        ego_yaw_rad = math.radians(float(ego_transform.rotation.yaw))
+        for actor in self.backend.state.world.get_actors():
+            if actor.id == self.backend.state.ego_actor.id:
+                continue
+            object_class = self._object_class_for_actor(actor)
+            if object_class is None:
+                continue
+            actor_location = actor.get_location()
+            dx = float(actor_location.x - ego_location.x)
+            dy = float(actor_location.y - ego_location.y)
+            forward_distance = math.cos(ego_yaw_rad) * dx + math.sin(ego_yaw_rad) * dy
+            lateral_distance = -math.sin(ego_yaw_rad) * dx + math.cos(ego_yaw_rad) * dy
+            if forward_distance <= 1.0 or forward_distance > 80.0:
+                continue
+            max_lateral = max(2.0, forward_distance * math.tan(math.radians(fov_deg * 0.5)))
+            if abs(lateral_distance) > max_lateral * 1.25:
+                continue
+            bbox_xyxy = self._approximate_image_bbox(
+                object_class=object_class,
+                forward_distance=forward_distance,
+                lateral_distance=lateral_distance,
+                image_width=image_width,
+                image_height=image_height,
+                max_lateral=max_lateral,
+            )
+            velocity = actor.get_velocity()
+            velocity_xyz = np.array([velocity.x, velocity.y, velocity.z], dtype=np.float32)
+            try:
+                bounding_box = actor.bounding_box
+                world_vertices = bounding_box.get_world_vertices(actor.get_transform())
+                world_bbox_3d = np.array(
+                    [[vertex.x, vertex.y, vertex.z] for vertex in world_vertices],
+                    dtype=np.float32,
+                )
+            except Exception:
+                self.logger.debug(
+                    "Skipping actor %s because its world bounding box could not be resolved",
+                    actor.id,
+                )
+                continue
+            annotation: dict[str, Any] = {
+                "track_id": int(actor.id),
+                "object_class": object_class.value,
+                "confidence": 1.0,
+                "image_bbox_xyxy": bbox_xyxy.tolist(),
+                "world_bbox_3d": world_bbox_3d.tolist(),
+                "velocity_xyz": velocity_xyz.tolist(),
+                "world_xyz": [actor_location.x, actor_location.y, actor_location.z],
+            }
+            if object_class == ObjectClass.TRAFFIC_LIGHT:
+                annotation["traffic_light_state"] = self._traffic_light_state(actor).value
+            annotations.append(annotation)
+        return annotations
+
+    def _object_class_for_actor(self, actor) -> ObjectClass | None:
+        type_id = str(getattr(actor, "type_id", ""))
+        if type_id.startswith("vehicle."):
+            return ObjectClass.VEHICLE
+        if type_id.startswith("walker."):
+            return ObjectClass.PEDESTRIAN
+        if type_id.startswith("traffic.traffic_light"):
+            return ObjectClass.TRAFFIC_LIGHT
+        return None
+
+    def _traffic_light_state(self, actor) -> TrafficLightState:
+        raw_state = getattr(actor, "state", None)
+        if hasattr(actor, "get_state"):
+            try:
+                raw_state = actor.get_state()
+            except Exception:
+                pass
+        state = str(raw_state or "Unknown").upper()
+        if "RED" in state:
+            return TrafficLightState.RED
+        if "YELLOW" in state or "AMBER" in state:
+            return TrafficLightState.AMBER
+        if "GREEN" in state:
+            return TrafficLightState.GREEN
+        return TrafficLightState.UNKNOWN
+
+    def _approximate_image_bbox(
+        self,
+        *,
+        object_class: ObjectClass,
+        forward_distance: float,
+        lateral_distance: float,
+        image_width: int,
+        image_height: int,
+        max_lateral: float,
+    ) -> np.ndarray:
+        normalized_x = np.clip(lateral_distance / max(max_lateral, 1.0), -1.0, 1.0)
+        center_x = (image_width * 0.5) + normalized_x * (image_width * 0.45)
+        base_height = {
+            ObjectClass.VEHICLE: 1200.0,
+            ObjectClass.PEDESTRIAN: 850.0,
+            ObjectClass.TRAFFIC_LIGHT: 500.0,
+        }.get(object_class, 900.0)
+        box_height = float(np.clip(base_height / max(forward_distance, 1.0), 18.0, image_height * 0.55))
+        aspect_ratio = {
+            ObjectClass.VEHICLE: 1.4,
+            ObjectClass.PEDESTRIAN: 0.45,
+            ObjectClass.TRAFFIC_LIGHT: 0.35,
+        }.get(object_class, 1.0)
+        box_width = max(14.0, box_height * aspect_ratio)
+        center_y = image_height * 0.90 - min(forward_distance, 60.0) * 4.0
+        x1 = float(np.clip(center_x - box_width * 0.5, 0.0, image_width - 1.0))
+        x2 = float(np.clip(center_x + box_width * 0.5, 1.0, image_width))
+        y1 = float(np.clip(center_y - box_height, 0.0, image_height - 1.0))
+        y2 = float(np.clip(center_y, 1.0, image_height))
+        return np.array([x1, y1, x2, y2], dtype=np.float32)
 
     def _await_frame(self, sensor_name: str, frame_id: int, required: bool):
         queue = self._queues.get(sensor_name)

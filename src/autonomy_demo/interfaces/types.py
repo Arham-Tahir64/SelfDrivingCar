@@ -110,11 +110,14 @@ class ObjectDetection:
     velocity: FloatArray
     confidence: float
     track_state: TrackState
+    image_bbox_xyxy: FloatArray | None = None
 
     def __post_init__(self) -> None:
         self.object_class = ObjectClass(self.object_class)
         self.world_bbox_3d = _float_array(self.world_bbox_3d, (8, 3))
         self.velocity = _float_array(self.velocity, (3,))
+        if self.image_bbox_xyxy is not None:
+            self.image_bbox_xyxy = _float_array(self.image_bbox_xyxy, (4,))
         if not 0.0 <= self.confidence <= 1.0:
             raise ValueError("confidence must be within [0, 1]")
 
@@ -153,9 +156,12 @@ class TrafficLightDetection:
     state: TrafficLightState
     stop_line_distance_m: float
     confidence: float
+    image_bbox_xyxy: FloatArray | None = None
 
     def __post_init__(self) -> None:
         self.world_xyz = _float_array(self.world_xyz, (3,))
+        if self.image_bbox_xyxy is not None:
+            self.image_bbox_xyxy = _float_array(self.image_bbox_xyxy, (4,))
 
 
 @dataclass(slots=True)
@@ -369,4 +375,7 @@ class RuntimeConfig:
     carla_launch_executable: Path
     town: str
     ego_vehicle_blueprint: str
+    perception_mode: str
+    perception_device: str
+    perception_model_variant: str
     latency_budget_ms: dict[str, float]

@@ -20,6 +20,7 @@ def load_runtime_config(app_config_path: Path) -> RuntimeConfig:
     data = _load_yaml(app_config_path)
     runtime = data.get("runtime", {})
     carla = data.get("carla", {})
+    perception = data.get("perception", {})
     evaluation = data.get("evaluation", {})
     if not runtime:
         raise ConfigurationError("runtime config is required")
@@ -45,6 +46,9 @@ def load_runtime_config(app_config_path: Path) -> RuntimeConfig:
         ),
         town=str(carla.get("town", "Town04")),
         ego_vehicle_blueprint=str(carla.get("ego_vehicle_blueprint", "vehicle.tesla.model3")),
+        perception_mode=str(perception.get("mode", "stub")),
+        perception_device=str(perception.get("device", "cpu")),
+        perception_model_variant=str(perception.get("model_variant", "bootstrap")),
         latency_budget_ms={
             key: float(value) for key, value in (evaluation.get("latency_budget_ms", {}) or {}).items()
         },

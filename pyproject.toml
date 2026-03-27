@@ -35,6 +35,7 @@ viz = [
 ml = [
   "torch>=2.4",
   "ultralytics>=8.3",
+  "opencv-python>=4.10",
   "transformers>=4.45",
   "scipy>=1.14",
 ]

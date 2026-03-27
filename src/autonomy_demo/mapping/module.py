@@ -26,13 +26,24 @@ class StubMappingModule:
         traffic_lights: list[TrafficLightDetection],
         ego_pose: EgoPose,
     ) -> LocalMap:
-        static_lane = StaticLaneSegment(
-            lane_id=ego_pose.current_lane_id,
-            centerline_world=np.array([[0.0, 50.0, 0.0], [100.0, 50.0, 0.0]], dtype=np.float32),
-            speed_limit_mps=22.35,
-        )
+        static_lanes = [
+            StaticLaneSegment(
+                lane_id=lane.lane_id,
+                centerline_world=np.asarray(lane.polyline_world, dtype=np.float32),
+                speed_limit_mps=22.35,
+            )
+            for lane in lanes
+        ]
+        if not static_lanes:
+            static_lanes = [
+                StaticLaneSegment(
+                    lane_id=ego_pose.current_lane_id,
+                    centerline_world=np.array([[0.0, 0.0, 0.0], [30.0, 0.0, 0.0]], dtype=np.float32),
+                    speed_limit_mps=22.35,
+                )
+            ]
         return LocalMap(
-            static_lanes=[static_lane],
+            static_lanes=static_lanes,
             dynamic_agents=detections,
             cone_instances=cones,
             temporary_boundaries=[lane for lane in lanes if lane.line_type.value == "TEMPORARY"],
@@ -40,4 +51,3 @@ class StubMappingModule:
             traffic_signal_states=traffic_lights,
             drivable_space=drivable_space,
         )
-

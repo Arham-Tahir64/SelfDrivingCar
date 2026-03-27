@@ -20,6 +20,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sensor-config", default="configs/sensors.default.yaml")
     parser.add_argument("--backend", choices=["stub", "carla"], default=None)
     parser.add_argument("--max-ticks", type=int, default=None)
+    parser.add_argument("--perception-mode", choices=["stub", "camera_v1"], default=None)
+    parser.add_argument("--perception-device", default=None)
+    parser.add_argument("--perception-model-variant", default=None)
     parser.add_argument("--visualize", action="store_true")
     parser.add_argument("--record", action="store_true")
     parser.add_argument("--validate", action="store_true")
@@ -34,6 +37,12 @@ def main() -> int:
         runtime_config.backend = args.backend
     if args.max_ticks is not None:
         runtime_config.max_ticks = args.max_ticks
+    if args.perception_mode:
+        runtime_config.perception_mode = args.perception_mode
+    if args.perception_device:
+        runtime_config.perception_device = args.perception_device
+    if args.perception_model_variant:
+        runtime_config.perception_model_variant = args.perception_model_variant
     if args.visualize:
         runtime_config.enable_visualization = True
     if args.record:
