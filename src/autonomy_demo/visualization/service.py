@@ -9,7 +9,7 @@ import numpy as np
 from autonomy_demo.common.logging import get_logger
 from autonomy_demo.common.paths import ensure_directory
 from autonomy_demo.interfaces.enums import TopicName
-from autonomy_demo.interfaces.types import CameraFrame, DrivableSpaceMask, EgoPose, LaneLine, ObjectDetection, TrafficLightDetection
+from autonomy_demo.interfaces.types import CameraFrame, ControlCommand, DrivableSpaceMask, EgoPose, EgoTrajectory, LaneLine, LocalMap, ObjectDetection, TrafficLightDetection
 
 
 class NullVisualizationService:
@@ -26,6 +26,9 @@ class NullVisualizationService:
         self._latest_traffic_lights: list[TrafficLightDetection] = []
         self._latest_drivable: DrivableSpaceMask | None = None
         self._latest_ego_pose: EgoPose | None = None
+        self._latest_local_map: LocalMap | None = None
+        self._latest_trajectory: EgoTrajectory | None = None
+        self._latest_command: ControlCommand | None = None
         self._latest_overlay: np.ndarray | None = None
 
     def attach(self, event_bus) -> None:
@@ -48,7 +51,12 @@ class NullVisualizationService:
             self._latest_drivable = payload
         elif topic == TopicName.LOCALIZATION_EGO_POSE.value and isinstance(payload, EgoPose):
             self._latest_ego_pose = payload
-        elif topic == TopicName.CONTROL_VEHICLE_COMMAND.value:
+        elif topic == TopicName.MAP_LOCAL_MAP.value and isinstance(payload, LocalMap):
+            self._latest_local_map = payload
+        elif topic == TopicName.PLANNING_EGO_TRAJECTORY.value and isinstance(payload, EgoTrajectory):
+            self._latest_trajectory = payload
+        elif topic == TopicName.CONTROL_VEHICLE_COMMAND.value and isinstance(payload, ControlCommand):
+            self._latest_command = payload
             self._latest_overlay = self._render_overlay()
 
     def flush(self) -> None:
@@ -106,6 +114,23 @@ class NullVisualizationService:
                 f"d: {self._latest_ego_pose.frenet_d:.2f} m",
                 f"heading err: {self._latest_ego_pose.heading_error_rad:.2f} rad",
             ]
+            if self._latest_trajectory is not None:
+                target_speed = max((waypoint.velocity for waypoint in self._latest_trajectory.waypoints), default=0.0)
+                overlay_lines.append(f"behavior: {self._latest_trajectory.behavior_state.value}")
+                overlay_lines.append(f"target speed: {target_speed:.2f} m/s")
+            if self._latest_command is not None:
+                overlay_lines.append(
+                    f"emergency: {'ON' if self._latest_command.emergency_override else 'off'}"
+                )
+            if self._latest_local_map is not None:
+                if self._latest_local_map.closed_lanes:
+                    overlay_lines.append(
+                        f"closed lane cue: {self._latest_local_map.closed_lanes[0]}"
+                    )
+                if self._latest_local_map.temporary_boundaries:
+                    overlay_lines.append(
+                        f"temporary boundaries: {len(self._latest_local_map.temporary_boundaries)}"
+                    )
             for index, text in enumerate(overlay_lines):
                 cv2.putText(
                     frame,

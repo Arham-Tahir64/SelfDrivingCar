@@ -15,9 +15,14 @@ from autonomy_demo.interfaces.types import (
     LocalMap,
     ObjectDetection,
     RadarFrame,
+    ScenarioConfig,
+    ScenarioEvalCriteria,
+    ScenarioTrigger,
     SensorFrameBundle,
     StaticLaneSegment,
     TrafficLightDetection,
+    Point2D,
+    Pose2D,
 )
 from autonomy_demo.localization.module import MapAwareLocalizationModule
 from autonomy_demo.mapping.lane_graph import FrenetProjection, LaneGraph, LaneGraphProvider, project_point_to_centerline
@@ -172,3 +177,78 @@ def test_lane_aware_prediction_follows_lane_centerline() -> None:
     assert len(predictions) == 1
     assert predictions[0].predicted_trajectory[1].x > predictions[0].predicted_trajectory[0].x
     assert abs(predictions[0].predicted_trajectory[1].y) < 1e-3
+
+
+def test_mapping_module_activates_merge_trigger_into_closed_lane_cue() -> None:
+    provider = _provider_with_single_lane()
+    provider.lane_graph.segments["road_1:section_0:lane_2"] = StaticLaneSegment(
+        lane_id="road_1:section_0:lane_2",
+        centerline_world=np.array([[0.0, 3.5, 0.0], [10.0, 3.5, 0.0], [20.0, 3.5, 0.0]], dtype=np.float32),
+        left_boundary_world=np.array([[0.0, 5.25, 0.0], [10.0, 5.25, 0.0], [20.0, 5.25, 0.0]], dtype=np.float32),
+        right_boundary_world=np.array([[0.0, 1.75, 0.0], [10.0, 1.75, 0.0], [20.0, 1.75, 0.0]], dtype=np.float32),
+        speed_limit_mps=20.0,
+    )
+    mapping = MapAwareMappingModule(provider, lane_horizon_radius_m=50.0, lane_limit=8)
+    scenario = ScenarioConfig(
+        scenario_id="SC-03",
+        name="Lane Merge",
+        map_name="Town04",
+        ego_spawn=Pose2D(x=0.0, y=0.0, z=0.0, yaw=0.0),
+        ego_goal=Point2D(x=30.0, y=3.5, z=0.0),
+        max_duration_s=20.0,
+        npcs=[],
+        props=[],
+        triggers=[ScenarioTrigger(type="merge_required", at_s=5.0, lane_id=1)],
+        eval=ScenarioEvalCriteria(min_completion_rate=0.8, max_collisions=0),
+    )
+    mapping.prepare(simulation=None, scenario=scenario)
+    ego_pose = EgoPose(
+        world_xyz=np.array([7.0, 0.0, 0.0], dtype=np.float32),
+        yaw_rad=0.0,
+        speed_mps=8.0,
+        acceleration_mps2=0.0,
+        current_lane_id="road_1:section_0:lane_1",
+        frenet_s=7.0,
+        frenet_d=0.0,
+        heading_error_rad=0.0,
+    )
+    local_map = mapping.run(
+        detections=[],
+        lanes=[],
+        drivable_space=DrivableSpaceMask(
+            mask=np.ones((4, 4), dtype=bool),
+            class_probabilities=np.ones((4, 4), dtype=np.float32),
+            source_sensor_id="front_camera",
+        ),
+        cones=[],
+        traffic_lights=[],
+        ego_pose=ego_pose,
+    )
+    assert "road_1:section_0:lane_1" in local_map.closed_lanes
+    assert local_map.temporary_boundaries
+
+    merged_pose = EgoPose(
+        world_xyz=np.array([12.0, 3.5, 0.0], dtype=np.float32),
+        yaw_rad=0.0,
+        speed_mps=8.0,
+        acceleration_mps2=0.0,
+        current_lane_id="road_1:section_0:lane_2",
+        frenet_s=12.0,
+        frenet_d=0.0,
+        heading_error_rad=0.0,
+    )
+    merged_local_map = mapping.run(
+        detections=[],
+        lanes=[],
+        drivable_space=DrivableSpaceMask(
+            mask=np.ones((4, 4), dtype=bool),
+            class_probabilities=np.ones((4, 4), dtype=np.float32),
+            source_sensor_id="front_camera",
+        ),
+        cones=[],
+        traffic_lights=[],
+        ego_pose=merged_pose,
+    )
+    assert "road_1:section_0:lane_1" in merged_local_map.closed_lanes
+    assert "road_1:section_0:lane_2" not in merged_local_map.closed_lanes
+    assert merged_local_map.temporary_boundaries == []

@@ -19,9 +19,8 @@ from autonomy_demo.mapping.module import build_mapping_module
 from autonomy_demo.orchestration.event_bus import InProcessEventBus
 from autonomy_demo.orchestration.pipeline_runtime import PipelineRuntime
 from autonomy_demo.perception.module import build_perception_module
-from autonomy_demo.planning.behavior_fsm import StubBehaviorPlanner
-from autonomy_demo.planning.motion_planner import StubMotionPlanner
-from autonomy_demo.planning.route_following import RouteFollowerMotionPlanner
+from autonomy_demo.planning.behavior_fsm import RuleBasedBehaviorPlanner, StubBehaviorPlanner
+from autonomy_demo.planning.motion_planner import FrenetMotionPlanner, StubMotionPlanner
 from autonomy_demo.prediction.module import build_prediction_module
 from autonomy_demo.replay.writer import Hdf5OrJsonReplayWriter
 from autonomy_demo.sensors.carla_sensor_suite import CarlaSensorSuite
@@ -119,7 +118,8 @@ class ScenarioRunner:
         mapping = build_mapping_module(self.runtime_config, lane_graph_provider)
         prediction = build_prediction_module(self.runtime_config)
         if self.runtime_config.backend == "carla":
-            motion_planner = RouteFollowerMotionPlanner()
+            behavior_planner = RuleBasedBehaviorPlanner()
+            motion_planner = FrenetMotionPlanner()
             controller = RouteFollowerController()
             evaluation = LiveEvaluationHarness(
                 scenario,
@@ -127,6 +127,7 @@ class ScenarioRunner:
                 backend=backend,
             )
         else:
+            behavior_planner = StubBehaviorPlanner()
             motion_planner = StubMotionPlanner()
             controller = StubController()
             evaluation = SimpleEvaluationHarness(scenario)
@@ -138,7 +139,7 @@ class ScenarioRunner:
             localization=localization,
             mapping=mapping,
             prediction=prediction,
-            behavior_planner=StubBehaviorPlanner(),
+            behavior_planner=behavior_planner,
             motion_planner=motion_planner,
             controller=controller,
             replay_writer=replay_writer,

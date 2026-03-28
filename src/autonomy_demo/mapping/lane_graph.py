@@ -22,6 +22,18 @@ def lane_id_from_waypoint(waypoint) -> str:
     )
 
 
+def parse_lane_id(lane_id: str) -> tuple[int, int, int] | None:
+    try:
+        road_text, section_text, lane_text = lane_id.split(":")
+        return (
+            int(road_text.split("_", 1)[1]),
+            int(section_text.split("_", 1)[1]),
+            int(lane_text.split("_", 1)[1]),
+        )
+    except Exception:
+        return None
+
+
 @dataclass(slots=True)
 class FrenetProjection:
     lane_id: str

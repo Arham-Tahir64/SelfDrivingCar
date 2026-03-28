@@ -10,7 +10,7 @@ import numpy as np
 from autonomy_demo.common.geometry import distance_xyz
 from autonomy_demo.common.logging import get_logger
 from autonomy_demo.interfaces.enums import TopicName
-from autonomy_demo.interfaces.types import DrivableSpaceMask, EgoPose, EvaluationSummary, LaneLine, ObjectDetection, RoutePlan
+from autonomy_demo.interfaces.types import ControlCommand, DrivableSpaceMask, EgoPose, EgoTrajectory, EvaluationSummary, LaneLine, ObjectDetection, RoutePlan
 from autonomy_demo.planning.route_following import route_progress_distance
 
 
@@ -98,6 +98,16 @@ class LiveEvaluationHarness:
         self.route_progress_alignment_offset: float | None = None
         self.route_progress_error_sum = 0.0
         self.route_progress_error_samples = 0
+        self.tracking_error_sum = 0.0
+        self.tracking_error_samples = 0
+        self.steer_sum = 0.0
+        self.max_abs_steer = 0.0
+        self.command_samples = 0
+        self.command_toggle_count = 0
+        self.emergency_override_count = 0
+        self.previous_command_mode: str | None = None
+        self.red_light_stop_checks = 0
+        self.red_light_stop_successes = 0
 
     def set_route_plan(self, route_plan: RoutePlan | None) -> None:
         self.route_plan = route_plan
@@ -114,6 +124,9 @@ class LiveEvaluationHarness:
         detections = snapshot.get(TopicName.PERCEPTION_DETECTIONS.value, [])
         lanes = snapshot.get(TopicName.PERCEPTION_LANES.value, [])
         drivable = snapshot.get(TopicName.PERCEPTION_DRIVABLE_SPACE.value)
+        trajectory = snapshot.get(TopicName.PLANNING_EGO_TRAJECTORY.value)
+        command = snapshot.get(TopicName.CONTROL_VEHICLE_COMMAND.value)
+        traffic_lights = snapshot.get(TopicName.PERCEPTION_TRAFFIC_LIGHTS.value, [])
         detection_track_ids = {
             detection.track_id
             for detection in detections
@@ -144,6 +157,34 @@ class LiveEvaluationHarness:
             aligned_progress = float(ego_pose.frenet_s) + float(self.route_progress_alignment_offset)
             self.route_progress_error_sum += abs(route_progress - aligned_progress)
             self.route_progress_error_samples += 1
+        if isinstance(trajectory, EgoTrajectory) and trajectory.waypoints:
+            target = trajectory.waypoints[min(1, len(trajectory.waypoints) - 1)]
+            self.tracking_error_sum += distance_xyz(
+                position,
+                np.array([target.x, target.y, float(position[2])], dtype=np.float32),
+            )
+            self.tracking_error_samples += 1
+        if isinstance(command, ControlCommand):
+            self.steer_sum += abs(float(command.steer))
+            self.max_abs_steer = max(self.max_abs_steer, abs(float(command.steer)))
+            self.command_samples += 1
+            if command.emergency_override:
+                self.emergency_override_count += 1
+            command_mode = "brake" if command.brake > 0.05 else "throttle" if command.throttle > 0.05 else "coast"
+            if self.previous_command_mode is not None and command_mode != self.previous_command_mode:
+                self.command_toggle_count += 1
+            self.previous_command_mode = command_mode
+        red_lights = [
+            light
+            for light in traffic_lights
+            if getattr(light, "state", None) is not None and getattr(light.state, "value", "") in {"RED", "AMBER"}
+        ]
+        if red_lights:
+            nearest_red = min(red_lights, key=lambda light: light.stop_line_distance_m)
+            if nearest_red.stop_line_distance_m <= 10.0:
+                self.red_light_stop_checks += 1
+                if ego_pose.speed_mps <= 1.5:
+                    self.red_light_stop_successes += 1
         self.speed_sum_mps += float(ego_pose.speed_mps)
         self.speed_samples += 1
         self.max_speed_mps = max(self.max_speed_mps, float(ego_pose.speed_mps))
@@ -201,6 +242,16 @@ class LiveEvaluationHarness:
             if self.route_progress_error_samples
             else 0.0
         )
+        mean_tracking_error_m = (
+            self.tracking_error_sum / self.tracking_error_samples if self.tracking_error_samples else 0.0
+        )
+        mean_abs_steer = self.steer_sum / self.command_samples if self.command_samples else 0.0
+        throttle_brake_oscillation_ratio = (
+            self.command_toggle_count / max(self.command_samples - 1, 1) if self.command_samples > 1 else 0.0
+        )
+        red_light_stop_compliance = (
+            self.red_light_stop_successes / self.red_light_stop_checks if self.red_light_stop_checks else 1.0
+        )
         success = (
             completion_rate >= self.scenario.eval.min_completion_rate
             and collision_count <= self.scenario.eval.max_collisions
@@ -215,6 +266,12 @@ class LiveEvaluationHarness:
             f"Localization valid lane ratio: {valid_lane_ratio:.2f}",
             f"Localization mean |d|: {mean_abs_lateral_offset_m:.2f} m",
             f"Localization/route progress mean error: {mean_route_progress_error_m:.2f} m",
+            f"Planning mean tracking error: {mean_tracking_error_m:.2f} m",
+            f"Control mean |steer|: {mean_abs_steer:.2f}",
+            f"Control max |steer|: {self.max_abs_steer:.2f}",
+            f"Control throttle/brake oscillation ratio: {throttle_brake_oscillation_ratio:.2f}",
+            f"Emergency override count: {self.emergency_override_count}",
+            f"Red-light stop compliance: {red_light_stop_compliance:.2f}",
         ]
         self.final_summary = EvaluationSummary(
             scenario_id=self.scenario.scenario_id,

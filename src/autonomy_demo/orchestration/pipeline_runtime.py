@@ -47,6 +47,8 @@ class PipelineRuntime:
                 self.mapping.prepare(self.simulation, scenario)
             if hasattr(self.prediction, "prepare"):
                 self.prediction.prepare(self.simulation, scenario)
+            if hasattr(self.behavior_planner, "prepare"):
+                self.behavior_planner.prepare(self.simulation, scenario)
             if hasattr(self.motion_planner, "prepare_route"):
                 self.motion_planner.prepare_route(self.simulation, scenario)
             if hasattr(self.evaluation, "set_route_plan"):
@@ -66,8 +68,12 @@ class PipelineRuntime:
                 ego_pose = self.localization.run(bundle)
                 local_map = self.mapping.run(detections, lanes, drivable_space, cones, traffic_lights, ego_pose)
                 predictions = self.prediction.run(local_map)
+                if hasattr(self.behavior_planner, "set_context"):
+                    self.behavior_planner.set_context(local_map, predictions)
                 behavior_state = self.behavior_planner.run(local_map, ego_pose)
                 trajectory = self.motion_planner.run(local_map, ego_pose, predictions, behavior_state)
+                if hasattr(self.controller, "set_context"):
+                    self.controller.set_context(local_map, predictions)
                 command = self.controller.run(trajectory, ego_pose)
 
                 self.context.event_bus.publish(TopicName.PERCEPTION_DETECTIONS.value, detections)

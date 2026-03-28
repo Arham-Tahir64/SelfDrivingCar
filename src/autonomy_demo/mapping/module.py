@@ -10,10 +10,11 @@ from autonomy_demo.interfaces.types import (
     LaneLine,
     LocalMap,
     ObjectDetection,
+    ScenarioTrigger,
     StaticLaneSegment,
     TrafficLightDetection,
 )
-from autonomy_demo.mapping.lane_graph import LaneGraphProvider
+from autonomy_demo.mapping.lane_graph import LaneGraphProvider, parse_lane_id
 
 
 class MapAwareMappingModule:
@@ -29,10 +30,14 @@ class MapAwareMappingModule:
         self.lane_graph_provider = lane_graph_provider
         self.lane_horizon_radius_m = lane_horizon_radius_m
         self.lane_limit = lane_limit
+        self._scenario_triggers: list[ScenarioTrigger] = []
+        self._activated_trigger_lanes: dict[str, str] = {}
 
     def prepare(self, simulation, scenario) -> None:
         if self.lane_graph_provider is not None:
             self.lane_graph_provider.prepare_from_simulation(simulation)
+        self._scenario_triggers = list(getattr(scenario, "triggers", []))
+        self._activated_trigger_lanes.clear()
 
     def run(
         self,
@@ -46,10 +51,16 @@ class MapAwareMappingModule:
         static_lanes = self._static_lanes_from_graph(ego_pose)
         if not static_lanes:
             static_lanes = self._fallback_static_lanes(lanes, ego_pose)
-        temporary_boundaries = [
-            lane for lane in lanes if lane.line_type == LaneLineType.TEMPORARY
-        ]
+        temporary_boundaries = [lane for lane in lanes if lane.line_type == LaneLineType.TEMPORARY]
         closed_lanes = [ego_pose.current_lane_id] if cones and ego_pose.current_lane_id else []
+        trigger_closed_lanes, trigger_boundaries = self._scenario_trigger_cues(
+            ego_pose=ego_pose,
+            static_lanes=static_lanes,
+        )
+        for lane_id in trigger_closed_lanes:
+            if lane_id not in closed_lanes:
+                closed_lanes.append(lane_id)
+        temporary_boundaries.extend(trigger_boundaries)
         return LocalMap(
             static_lanes=static_lanes,
             dynamic_agents=detections,
@@ -107,6 +118,94 @@ class MapAwareMappingModule:
                 speed_limit_mps=22.35,
             )
         ]
+
+    def _scenario_trigger_cues(
+        self,
+        *,
+        ego_pose: EgoPose,
+        static_lanes: list[StaticLaneSegment],
+    ) -> tuple[list[str], list[LaneLine]]:
+        if not self._scenario_triggers:
+            return [], []
+        closed_lanes: list[str] = []
+        temporary_boundaries: list[LaneLine] = []
+        for trigger in self._scenario_triggers:
+            if trigger.at_s is not None and ego_pose.frenet_s < float(trigger.at_s):
+                continue
+            if trigger.type not in {"merge_required", "lane_closure"}:
+                continue
+            target_lane_id = self._resolved_or_activate_trigger_lane_id(
+                trigger=trigger,
+                ego_lane_id=ego_pose.current_lane_id,
+                static_lanes=static_lanes,
+            )
+            if target_lane_id is None:
+                continue
+            if target_lane_id not in closed_lanes:
+                closed_lanes.append(target_lane_id)
+            if ego_pose.current_lane_id != target_lane_id:
+                continue
+            segment = next((lane for lane in static_lanes if lane.lane_id == target_lane_id), None)
+            if segment is None:
+                continue
+            boundary_world = (
+                segment.right_boundary_world
+                if len(segment.right_boundary_world)
+                else segment.centerline_world
+            )
+            temporary_boundaries.append(
+                LaneLine(
+                    lane_id=f"trigger:{trigger.type}:{target_lane_id}",
+                    polyline_image=np.zeros((len(boundary_world), 2), dtype=np.float32),
+                    polyline_world=np.asarray(boundary_world, dtype=np.float32),
+                    line_type=LaneLineType.TEMPORARY,
+                    confidence=1.0,
+                )
+            )
+        return closed_lanes, temporary_boundaries
+
+    def _resolved_or_activate_trigger_lane_id(
+        self,
+        *,
+        trigger: ScenarioTrigger,
+        ego_lane_id: str,
+        static_lanes: list[StaticLaneSegment],
+    ) -> str | None:
+        trigger_key = self._trigger_key(trigger)
+        if trigger_key in self._activated_trigger_lanes:
+            return self._activated_trigger_lanes[trigger_key]
+        resolved_lane_id = self._resolve_trigger_lane_id(
+            trigger=trigger,
+            ego_lane_id=ego_lane_id,
+            static_lanes=static_lanes,
+        )
+        if resolved_lane_id is not None:
+            self._activated_trigger_lanes[trigger_key] = resolved_lane_id
+        return resolved_lane_id
+
+    def _resolve_trigger_lane_id(
+        self,
+        *,
+        trigger: ScenarioTrigger,
+        ego_lane_id: str,
+        static_lanes: list[StaticLaneSegment],
+    ) -> str | None:
+        if isinstance(trigger.lane_id, str):
+            if any(segment.lane_id == trigger.lane_id for segment in static_lanes):
+                return trigger.lane_id
+        if isinstance(trigger.lane_id, int):
+            for segment in static_lanes:
+                parsed = parse_lane_id(segment.lane_id)
+                if parsed is not None and parsed[2] == int(trigger.lane_id):
+                    return segment.lane_id
+        if any(segment.lane_id == ego_lane_id for segment in static_lanes):
+            return ego_lane_id
+        if static_lanes:
+            return static_lanes[0].lane_id
+        return None
+
+    def _trigger_key(self, trigger: ScenarioTrigger) -> str:
+        return f"{trigger.type}:{trigger.at_s}:{trigger.lane_id}:{sorted(trigger.metadata.items())}"
 
 
 def build_mapping_module(runtime_config, lane_graph_provider: LaneGraphProvider | None = None):
