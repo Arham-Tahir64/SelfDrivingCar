@@ -36,7 +36,7 @@ export interface ConeDetection {
 export interface AgentPrediction {
   track_id: number;
   object_class: string;
-  predicted_trajectory: number[][];
+  predicted_trajectory: Waypoint[];
   confidence_by_step: number[];
 }
 
@@ -67,19 +67,19 @@ export interface ControlCommand {
 export interface StaticLane {
   lane_id: string;
   centerline_world: number[][];
-  left_boundary: number[][];
-  right_boundary: number[][];
+  left_boundary_world: number[][];
+  right_boundary_world: number[][];
   speed_limit_mps: number;
-  is_closed: boolean;
+  is_junction?: boolean;
 }
 
 export interface LocalMap {
   static_lanes: StaticLane[];
   dynamic_agents: ObjectDetection[];
   cone_instances: ConeDetection[];
-  temporary_boundaries: number[][][];
+  temporary_boundaries: LaneLine[];
   closed_lanes: string[];
-  traffic_signal_states: Record<string, string>;
+  traffic_signal_states: TrafficLightDetection[];
 }
 
 export interface ScenarioInfo {

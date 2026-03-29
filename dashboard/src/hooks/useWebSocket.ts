@@ -2,9 +2,18 @@ import { useEffect, useRef } from "react";
 import { useFrameStore } from "../store/frameStore";
 import type { PipelineFrame } from "../utils/types";
 
-const WS_URL = `ws://${window.location.hostname}:8765/ws`;
 const RECONNECT_BASE_MS = 1000;
 const RECONNECT_MAX_MS = 10000;
+
+function resolveWebSocketUrl(): string {
+  const pageHost = window.location.hostname;
+  const host =
+    !pageHost || pageHost === "0.0.0.0" || pageHost === "[::]"
+      ? "127.0.0.1"
+      : pageHost;
+  const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+  return `${protocol}://${host}:8765/ws`;
+}
 
 export function useWebSocket() {
   const pushFrame = useFrameStore((s) => s.pushFrame);
@@ -18,7 +27,7 @@ export function useWebSocket() {
 
     function connect() {
       if (cancelled) return;
-      const ws = new WebSocket(WS_URL);
+      const ws = new WebSocket(resolveWebSocketUrl());
       wsRef.current = ws;
 
       ws.onopen = () => {

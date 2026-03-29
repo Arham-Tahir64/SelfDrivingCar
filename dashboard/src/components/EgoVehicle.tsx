@@ -2,26 +2,41 @@ import { useRef } from "react";
 import { useFrame } from "@react-three/fiber";
 import * as THREE from "three";
 import { useFrameStore } from "../store/frameStore";
+import { dampAngle, worldToScene, yawToScene } from "../utils/scene";
 
 const EGO_LENGTH = 4.5;
 const EGO_WIDTH = 2.0;
 const EGO_HEIGHT = 1.5;
 const CYAN = new THREE.Color("#00E5FF");
+const POSITION_SMOOTHING = 0.22;
+const ROTATION_SMOOTHING = 0.18;
 
 export default function EgoVehicle() {
   const meshRef = useRef<THREE.Mesh>(null);
   const edgesRef = useRef<THREE.LineSegments>(null);
+  const targetPosition = useRef(new THREE.Vector3());
+  const initialized = useRef(false);
 
   useFrame(() => {
     const frame = useFrameStore.getState().currentFrame;
     const ego = frame?.["localization/ego_pose"];
     if (!ego || !meshRef.current || !edgesRef.current) return;
 
-    const [x, , z] = ego.world_xyz;
-    // CARLA uses left-handed Y-up; Three.js uses right-handed Y-up.
-    // Map CARLA (x, z) → Three.js (x, z), y is up.
-    meshRef.current.position.set(x, EGO_HEIGHT / 2, -z);
-    meshRef.current.rotation.y = -ego.yaw_rad;
+    targetPosition.current.copy(worldToScene(ego.world_xyz));
+    targetPosition.current.y = EGO_HEIGHT / 2;
+
+    if (!initialized.current) {
+      meshRef.current.position.copy(targetPosition.current);
+      meshRef.current.rotation.y = yawToScene(ego.yaw_rad);
+      initialized.current = true;
+    } else {
+      meshRef.current.position.lerp(targetPosition.current, POSITION_SMOOTHING);
+      meshRef.current.rotation.y = dampAngle(
+        meshRef.current.rotation.y,
+        yawToScene(ego.yaw_rad),
+        ROTATION_SMOOTHING,
+      );
+    }
 
     edgesRef.current.position.copy(meshRef.current.position);
     edgesRef.current.rotation.copy(meshRef.current.rotation);

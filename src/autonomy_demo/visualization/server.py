@@ -4,6 +4,10 @@ import asyncio
 import threading
 from pathlib import Path
 
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+
 from autonomy_demo.common.logging import get_logger
 from autonomy_demo.visualization.websocket_bridge import WebSocketBridge
 
@@ -13,10 +17,6 @@ _DASHBOARD_DIST = Path(__file__).resolve().parents[3] / "dashboard" / "dist"
 
 
 def create_app(bridge: WebSocketBridge):
-    from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-    from fastapi.responses import JSONResponse
-    from fastapi.staticfiles import StaticFiles
-
     app = FastAPI(title="Autonomy Demo Dashboard")
 
     @app.get("/api/status")
@@ -27,6 +27,7 @@ def create_app(bridge: WebSocketBridge):
     async def websocket_endpoint(ws: WebSocket):
         await ws.accept()
         bridge.register(ws)
+        logger.info("Dashboard websocket accepted (%d clients)", bridge.client_count)
         try:
             while True:
                 await ws.receive_text()
@@ -36,7 +37,13 @@ def create_app(bridge: WebSocketBridge):
             bridge.unregister(ws)
 
     if _DASHBOARD_DIST.is_dir():
-        app.mount("/", StaticFiles(directory=str(_DASHBOARD_DIST), html=True), name="static")
+        assets_dir = _DASHBOARD_DIST / "assets"
+        if assets_dir.is_dir():
+            app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="assets")
+
+        @app.get("/")
+        async def dashboard_index():
+            return FileResponse(_DASHBOARD_DIST / "index.html")
 
     return app
 
@@ -62,5 +69,14 @@ def start_server_thread(
 
     thread = threading.Thread(target=_run, daemon=True, name="ws-server")
     thread.start()
-    logger.info("WebSocket server started on ws://%s:%d/ws", host, port)
+    browser_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
+    logger.info(
+        "WebSocket server bound to %s:%d; open http://%s:%d/ and connect to ws://%s:%d/ws",
+        host,
+        port,
+        browser_host,
+        port,
+        browser_host,
+        port,
+    )
     return thread

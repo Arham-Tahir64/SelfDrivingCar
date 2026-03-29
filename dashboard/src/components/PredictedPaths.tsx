@@ -28,7 +28,7 @@ export default function PredictedPaths() {
       if (!pred.predicted_trajectory || pred.predicted_trajectory.length < 2) continue;
 
       const points = pred.predicted_trajectory.map(
-        (p: number[]) => new THREE.Vector3(p[0], 0.1, -(p[1] ?? 0)),
+        (p) => new THREE.Vector3(p.x, 0.1, -p.y),
       );
       const geom = new THREE.BufferGeometry().setFromPoints(points);
       const color = classColor(pred.object_class);

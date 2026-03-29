@@ -48,7 +48,7 @@ export default function LaneLines() {
     if (localMap?.static_lanes) {
       for (let i = 0; i < Math.min(localMap.static_lanes.length, MAX_LANES); i++) {
         const sl = localMap.static_lanes[i];
-        const isClosed = sl.is_closed || localMap.closed_lanes?.includes(sl.lane_id);
+        const isClosed = localMap.closed_lanes?.includes(sl.lane_id);
 
         // Centerline
         if (sl.centerline_world && sl.centerline_world.length >= 2) {
@@ -69,8 +69,8 @@ export default function LaneLines() {
         }
 
         // Left boundary
-        if (sl.left_boundary && sl.left_boundary.length >= 2) {
-          const pts = sl.left_boundary.map(
+        if (sl.left_boundary_world && sl.left_boundary_world.length >= 2) {
+          const pts = sl.left_boundary_world.map(
             (p: number[]) => new THREE.Vector3(p[0], 0.04, -(p[1] ?? 0)),
           );
           const geom = new THREE.BufferGeometry().setFromPoints(pts);
@@ -83,8 +83,8 @@ export default function LaneLines() {
         }
 
         // Right boundary
-        if (sl.right_boundary && sl.right_boundary.length >= 2) {
-          const pts = sl.right_boundary.map(
+        if (sl.right_boundary_world && sl.right_boundary_world.length >= 2) {
+          const pts = sl.right_boundary_world.map(
             (p: number[]) => new THREE.Vector3(p[0], 0.04, -(p[1] ?? 0)),
           );
           const geom = new THREE.BufferGeometry().setFromPoints(pts);
@@ -101,8 +101,8 @@ export default function LaneLines() {
     // Draw temporary boundaries
     if (localMap?.temporary_boundaries) {
       for (const boundary of localMap.temporary_boundaries) {
-        if (!boundary || boundary.length < 2) continue;
-        const pts = boundary.map(
+        if (!boundary?.polyline_world || boundary.polyline_world.length < 2) continue;
+        const pts = boundary.polyline_world.map(
           (p: number[]) => new THREE.Vector3(p[0], 0.06, -(p[1] ?? 0)),
         );
         const geom = new THREE.BufferGeometry().setFromPoints(pts);
