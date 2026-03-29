@@ -390,3 +390,5 @@ class RuntimeConfig:
     perception_device: str
     perception_model_variant: str
     latency_budget_ms: dict[str, float]
+    ws_host: str = "0.0.0.0"
+    ws_port: int = 8765

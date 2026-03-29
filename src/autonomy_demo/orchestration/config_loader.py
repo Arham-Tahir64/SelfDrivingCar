@@ -22,6 +22,7 @@ def load_runtime_config(app_config_path: Path) -> RuntimeConfig:
     carla = data.get("carla", {})
     perception = data.get("perception", {})
     evaluation = data.get("evaluation", {})
+    visualization = data.get("visualization", {})
     if not runtime:
         raise ConfigurationError("runtime config is required")
     return RuntimeConfig(
@@ -52,6 +53,8 @@ def load_runtime_config(app_config_path: Path) -> RuntimeConfig:
         latency_budget_ms={
             key: float(value) for key, value in (evaluation.get("latency_budget_ms", {}) or {}).items()
         },
+        ws_host=str(visualization.get("ws_host", "0.0.0.0")),
+        ws_port=int(visualization.get("ws_port", 8765)),
     )
 
 

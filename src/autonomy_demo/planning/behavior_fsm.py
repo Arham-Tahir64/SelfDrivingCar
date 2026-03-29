@@ -39,6 +39,7 @@ class RuleBasedBehaviorPlanner:
         self._latest_predictions = []
         self._merge_source_lane_id: str | None = None
         self._merge_cooldown_remaining = 0
+        self._merge_complete_ticks = 0
 
     def prepare(self, simulation, scenario) -> None:
         self.goal_xyz = np.array(
@@ -65,14 +66,23 @@ class RuleBasedBehaviorPlanner:
         if (
             self.current_state in {BehaviorState.PREPARE_MERGE, BehaviorState.MERGING}
             and self._merge_source_lane_id is not None
-            and ego_pose.current_lane_id != self._merge_source_lane_id
-            and ego_pose.current_lane_id not in local_map.closed_lanes
-            and not local_map.temporary_boundaries
         ):
-            self.current_state = BehaviorState.LANE_KEEP
-            self._merge_source_lane_id = None
-            self._merge_cooldown_remaining = self.merge_cooldown_ticks
-            return self.current_state
+            in_new_lane = (
+                ego_pose.current_lane_id != self._merge_source_lane_id
+                and ego_pose.current_lane_id not in local_map.closed_lanes
+                and not local_map.temporary_boundaries
+                and abs(ego_pose.frenet_d) < 0.5
+            )
+            if in_new_lane:
+                self._merge_complete_ticks += 1
+            else:
+                self._merge_complete_ticks = 0
+            if self._merge_complete_ticks >= 5:
+                self.current_state = BehaviorState.LANE_KEEP
+                self._merge_source_lane_id = None
+                self._merge_complete_ticks = 0
+                self._merge_cooldown_remaining = self.merge_cooldown_ticks
+                return self.current_state
 
         closure_merge_requested = (
             ego_pose.current_lane_id in local_map.closed_lanes

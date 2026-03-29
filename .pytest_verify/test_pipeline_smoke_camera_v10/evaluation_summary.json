@@ -1,0 +1,24 @@
+{
+  "scenario_id": "SC-TEST",
+  "success": true,
+  "completion_rate": 1.0,
+  "collision_count": 0,
+  "red_light_violations": 0,
+  "pedestrian_clearance_min_m": 2.5,
+  "latency_ms": {
+    "perception": 5.0,
+    "localization": 1.0,
+    "mapping": 2.0,
+    "prediction": 2.0,
+    "planning": 3.0,
+    "control": 1.0
+  },
+  "distance_traveled_m": 0.0,
+  "goal_reached": true,
+  "sim_duration_s": 0.1,
+  "mean_speed_mps": 0.0,
+  "max_speed_mps": 0.0,
+  "notes": [
+    "Stub evaluation only; replace with scenario-specific metrics."
+  ]
+}

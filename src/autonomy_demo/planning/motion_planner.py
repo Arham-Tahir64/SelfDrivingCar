@@ -166,7 +166,12 @@ class FrenetMotionPlanner:
     ) -> EgoTrajectory:
         current_projection = project_point_to_centerline(current_lane.centerline_world, ego_pose.world_xyz)
         target_projection = project_point_to_centerline(target_lane.centerline_world, ego_pose.world_xyz)
-        merge_alpha_max = 0.75 if target_lane.lane_id != current_lane.lane_id else 0.0
+        if target_lane.lane_id == current_lane.lane_id:
+            merge_alpha_max = 0.0
+        elif behavior_state == BehaviorState.MERGING:
+            merge_alpha_max = 1.0
+        else:
+            merge_alpha_max = 0.75
         waypoints: list[Waypoint] = []
         accumulated_s = current_projection.s
         for step in range(self.horizon_steps):

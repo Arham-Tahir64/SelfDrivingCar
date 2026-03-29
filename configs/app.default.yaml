@@ -17,6 +17,9 @@ carla:
   launch_executable: C:\Users\Arham\Desktop\CARLA_0.9.16\CarlaUE4.exe
   town: Town04
   ego_vehicle_blueprint: vehicle.tesla.model3
+visualization:
+  ws_host: "0.0.0.0"
+  ws_port: 8765
 perception:
   mode: camera_v1
   device: cpu

@@ -27,6 +27,8 @@ from autonomy_demo.sensors.carla_sensor_suite import CarlaSensorSuite
 from autonomy_demo.sensors.sensor_manager import SensorManager
 from autonomy_demo.sim.backends import CarlaSimulationBackend, StubSimulationBackend
 from autonomy_demo.visualization.service import NullVisualizationService
+from autonomy_demo.visualization.websocket_bridge import WebSocketBridge
+from autonomy_demo.visualization.server import start_server_thread
 
 
 @dataclass(slots=True)
@@ -111,7 +113,16 @@ class ScenarioRunner:
             latency_budget_ms=self.runtime_config.latency_budget_ms,
         )
         replay_writer = Hdf5OrJsonReplayWriter(self.output_dir) if record else None
-        visualization = NullVisualizationService(enabled=visualize, output_dir=self.output_dir)
+        if visualize:
+            bridge = WebSocketBridge()
+            start_server_thread(
+                bridge,
+                host=self.runtime_config.ws_host,
+                port=self.runtime_config.ws_port,
+            )
+            visualization = bridge
+        else:
+            visualization = NullVisualizationService(enabled=False, output_dir=self.output_dir)
         perception = build_perception_module(self.runtime_config)
         lane_graph_provider = LaneGraphProvider()
         localization = build_localization_module(self.runtime_config, lane_graph_provider)

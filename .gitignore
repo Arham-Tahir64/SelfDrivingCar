@@ -16,3 +16,5 @@ dist/
 outputs/
 replays/
 logs/
+dashboard/node_modules/
+dashboard/dist/

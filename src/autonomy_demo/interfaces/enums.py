@@ -63,3 +63,5 @@ class TopicName(str, Enum):
     PREDICTION_AGENTS = "prediction/agents"
     PLANNING_EGO_TRAJECTORY = "planning/ego_trajectory"
     CONTROL_VEHICLE_COMMAND = "control/vehicle_command"
+    TICK_COMPLETE = "system/tick_complete"
+    SCENARIO_INFO = "system/scenario_info"

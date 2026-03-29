@@ -55,6 +55,15 @@ class PipelineRuntime:
                 self.evaluation.set_route_plan(getattr(self.motion_planner, "route_plan", None))
             if self.visualization:
                 self.visualization.attach(self.context.event_bus)
+            self.context.event_bus.publish(
+                TopicName.SCENARIO_INFO.value,
+                {
+                    "scenario_id": scenario.scenario_id,
+                    "name": scenario.name,
+                    "map_name": scenario.map_name,
+                    "max_duration_s": scenario.max_duration_s,
+                },
+            )
             for tick_id in range(max_ticks):
                 self.simulation.tick(tick_id)
                 sim_time_s = tick_id / 20.0
@@ -86,6 +95,10 @@ class PipelineRuntime:
                 self.context.event_bus.publish(TopicName.PREDICTION_AGENTS.value, predictions)
                 self.context.event_bus.publish(TopicName.PLANNING_EGO_TRAJECTORY.value, trajectory)
                 self.context.event_bus.publish(TopicName.CONTROL_VEHICLE_COMMAND.value, command)
+                self.context.event_bus.publish(
+                    TopicName.TICK_COMPLETE.value,
+                    {"tick_id": tick_id, "sim_time_s": sim_time_s},
+                )
 
                 self.simulation.apply_control(command)
                 snapshot = self.context.event_bus.snapshot()
