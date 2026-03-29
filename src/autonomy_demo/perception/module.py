@@ -35,14 +35,11 @@ from autonomy_demo.perception.tracking import SimpleSortTracker
 
 def _count_by_modality(
     detections: list[ObjectDetection],
-    cones: list[ConeDetection],
     traffic_lights: list[TrafficLightDetection],
 ) -> dict[str, int]:
     counts: Counter[str] = Counter()
     for detection in detections:
         counts[str(detection.source_modality)] += 1
-    for cone in cones:
-        counts[str(cone.source_modality)] += 1
     for traffic_light in traffic_lights:
         counts[str(traffic_light.source_modality)] += 1
     return dict(sorted(counts.items()))
@@ -53,17 +50,15 @@ def _build_perception_status(
     active_mode: str,
     fallback_state: str,
     detections: list[ObjectDetection],
-    cones: list[ConeDetection],
     traffic_lights: list[TrafficLightDetection],
     active_camera_sensors: list[str],
 ) -> PerceptionStatus:
     return PerceptionStatus(
         active_mode=active_mode,
         fallback_state=fallback_state,
-        counts_by_modality=_count_by_modality(detections, cones, traffic_lights),
+        counts_by_modality=_count_by_modality(detections, traffic_lights),
         active_camera_sensors=active_camera_sensors,
         detection_count=len(detections),
-        cone_count=len(cones),
         traffic_light_count=len(traffic_lights),
     )
 
@@ -75,7 +70,6 @@ def _record_perception_metadata(
     lanes: list[LaneLine],
     drivable_space: DrivableSpaceMask,
     traffic_lights: list[TrafficLightDetection],
-    cones: list[ConeDetection],
     status_summary: PerceptionStatus,
 ) -> None:
     bundle.metadata["perception_status"] = "ok"
@@ -172,12 +166,7 @@ class StubPerceptionModule:
             source_sensor_ids=["front_camera"],
             position_estimate_kind="truth_fallback",
         )
-        cone = ConeDetection(
-            world_xyz=np.array([25.0, 48.0, 0.0], dtype=np.float32),
-            confidence=0.88,
-            source_modality="bootstrap",
-        )
-        return [detection], [lane], drivable, [traffic_light], [cone]
+        return [detection], [lane], drivable, [traffic_light], []
 
 
 class _CameraSceneContextMixin:
@@ -233,7 +222,6 @@ class PerceptionStack(_CameraSceneContextMixin):
                 active_mode="camera_v1",
                 fallback_state=fallback_state,
                 detections=object_detections,
-                cones=[],
                 traffic_lights=traffic_lights,
                 active_camera_sensors=active_camera_sensors,
             )
@@ -243,7 +231,6 @@ class PerceptionStack(_CameraSceneContextMixin):
                 lanes=lanes,
                 drivable_space=drivable_space,
                 traffic_lights=traffic_lights,
-                cones=[],
                 status_summary=status_summary,
             )
             bundle.metadata["perception_camera_detection_counts"] = self._camera_detection_counts(
@@ -426,7 +413,7 @@ class LidarPerceptionStack(_CameraSceneContextMixin):
         list[ConeDetection],
     ]:
         try:
-            object_detections, cones = self.detect_dynamic(bundle)
+            object_detections = self.detect_dynamic(bundle)
             lanes, drivable_space = self._scene_context(
                 bundle,
                 lane_extractor=self.lane_extractor,
@@ -441,7 +428,6 @@ class LidarPerceptionStack(_CameraSceneContextMixin):
                 active_mode="lidar_v1",
                 fallback_state="lidar_only",
                 detections=object_detections,
-                cones=cones,
                 traffic_lights=[],
                 active_camera_sensors=active_camera_sensors,
             )
@@ -451,13 +437,11 @@ class LidarPerceptionStack(_CameraSceneContextMixin):
                 lanes=lanes,
                 drivable_space=drivable_space,
                 traffic_lights=[],
-                cones=cones,
                 status_summary=status_summary,
             )
             bundle.metadata["perception_lidar_cluster_count"] = len(object_detections)
-            bundle.metadata["perception_cone_count"] = len(cones)
             bundle.metadata["perception_camera_detections"] = {}
-            return object_detections, lanes, drivable_space, [], cones
+            return object_detections, lanes, drivable_space, [], []
         except Exception as exc:
             bundle.metadata["perception_status"] = "degraded"
             bundle.metadata["perception_error"] = str(exc)
@@ -468,10 +452,10 @@ class LidarPerceptionStack(_CameraSceneContextMixin):
     def detect_dynamic(
         self,
         bundle: SensorFrameBundle,
-    ) -> tuple[list[ObjectDetection], list[ConeDetection]]:
-        detections_3d, cones = self.detector.detect(bundle)
+    ) -> list[ObjectDetection]:
+        detections_3d = self.detector.detect(bundle)
         tracked_detections = self.tracker.update(detections_3d, timestamp_s=float(bundle.sim_time_s))
-        return self._convert_tracked(tracked_detections), cones
+        return self._convert_tracked(tracked_detections)
 
     def _convert_tracked(
         self,
@@ -523,7 +507,7 @@ class FusedPerceptionStack(_CameraSceneContextMixin):
             camera_detections, traffic_lights, camera_fallback_state, active_camera_sensors, camera_detection_debug = (
                 self.camera_stack.detect_dynamic(bundle)
             )
-            lidar_detections, cones = self.lidar_stack.detect_dynamic(bundle)
+            lidar_detections = self.lidar_stack.detect_dynamic(bundle)
             fused_objects = fuse_detections(camera_detections, lidar_detections)
             lanes, drivable_space = self._scene_context(
                 bundle,
@@ -531,28 +515,25 @@ class FusedPerceptionStack(_CameraSceneContextMixin):
                 drivable_extractor=self.drivable_extractor,
             )
             status_summary = _build_perception_status(
-                active_mode="fused_v1",
-                fallback_state=self._fused_fallback_state(
+                    active_mode="fused_v1",
+                    fallback_state=self._fused_fallback_state(
+                        detections=fused_objects,
+                        camera_fallback_state=camera_fallback_state,
+                    ),
                     detections=fused_objects,
-                    camera_fallback_state=camera_fallback_state,
-                    cones=cones,
-                ),
-                detections=fused_objects,
-                cones=cones,
-                traffic_lights=traffic_lights,
-                active_camera_sensors=active_camera_sensors,
-            )
+                    traffic_lights=traffic_lights,
+                    active_camera_sensors=active_camera_sensors,
+                )
             _record_perception_metadata(
                 bundle,
                 detections=fused_objects,
                 lanes=lanes,
                 drivable_space=drivable_space,
                 traffic_lights=traffic_lights,
-                cones=cones,
                 status_summary=status_summary,
             )
             bundle.metadata["perception_camera_detections"] = camera_detection_debug
-            return fused_objects, lanes, drivable_space, traffic_lights, cones
+            return fused_objects, lanes, drivable_space, traffic_lights, []
         except Exception as exc:
             bundle.metadata["perception_status"] = "degraded"
             bundle.metadata["perception_error"] = str(exc)
@@ -565,14 +546,11 @@ class FusedPerceptionStack(_CameraSceneContextMixin):
         *,
         detections: list[ObjectDetection],
         camera_fallback_state: str,
-        cones: list[ConeDetection],
     ) -> str:
         modalities = {detection.source_modality for detection in detections}
         if "fused" in modalities:
             return "fused"
-        if "lidar" in modalities or cones:
-            if any(modality in {"camera", "bootstrap"} for modality in modalities):
-                return "fused"
+        if "lidar" in modalities:
             return "lidar_only"
         if camera_fallback_state == "bootstrap":
             return "bootstrap"

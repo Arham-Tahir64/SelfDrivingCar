@@ -9,7 +9,6 @@ import LaneLines from "./LaneLines";
 import DetectedAgents from "./DetectedAgents";
 import PlannedTrajectory from "./PlannedTrajectory";
 import PredictedPaths from "./PredictedPaths";
-import Cones from "./Cones";
 import TrafficLights from "./TrafficLights";
 
 const CAMERA_OFFSET_LOCAL = new THREE.Vector3(-18, 20, 0);
@@ -106,7 +105,6 @@ export default function BEVScene() {
       <TrafficLights />
       <PlannedTrajectory />
       <PredictedPaths />
-      <Cones />
     </>
   );
 }

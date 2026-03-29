@@ -85,10 +85,4 @@ def fuse_detections(
         used_camera_indices.add(camera_index)
         used_lidar_indices.add(lidar_index)
 
-    fused.extend(
-        detection for index, detection in enumerate(camera_detections) if index not in used_camera_indices
-    )
-    fused.extend(
-        detection for index, detection in enumerate(lidar_detections) if index not in used_lidar_indices
-    )
     return fused

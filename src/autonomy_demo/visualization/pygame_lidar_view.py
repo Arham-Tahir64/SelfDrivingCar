@@ -8,7 +8,7 @@ import numpy as np
 
 from autonomy_demo.common.logging import get_logger
 from autonomy_demo.interfaces.enums import ObjectClass, TopicName
-from autonomy_demo.interfaces.types import ConeDetection, EgoPose, LidarFrame, ObjectDetection
+from autonomy_demo.interfaces.types import EgoPose, LidarFrame, ObjectDetection
 
 
 class PygameLidarVisualizationService:
@@ -23,7 +23,6 @@ class PygameLidarVisualizationService:
         self._font = None
         self._latest_lidar: LidarFrame | None = None
         self._latest_detections: list[ObjectDetection] = []
-        self._latest_cones: list[ConeDetection] = []
         self._latest_ego_pose: EgoPose | None = None
         self._latest_tick_id = -1
         self._latest_sim_time_s = 0.0
@@ -38,7 +37,6 @@ class PygameLidarVisualizationService:
             return
         event_bus.subscribe(TopicName.SENSOR_LIDAR.value, self._handle)
         event_bus.subscribe(TopicName.PERCEPTION_DETECTIONS.value, self._handle)
-        event_bus.subscribe(TopicName.PERCEPTION_CONES.value, self._handle)
         event_bus.subscribe(TopicName.LOCALIZATION_EGO_POSE.value, self._handle)
         event_bus.subscribe(TopicName.TICK_COMPLETE.value, self._handle)
         self.logger.info("Pygame LiDAR viewer attached")
@@ -70,8 +68,6 @@ class PygameLidarVisualizationService:
             self._latest_lidar = payload
         elif topic == TopicName.PERCEPTION_DETECTIONS.value and isinstance(payload, list):
             self._latest_detections = [item for item in payload if isinstance(item, ObjectDetection)]
-        elif topic == TopicName.PERCEPTION_CONES.value and isinstance(payload, list):
-            self._latest_cones = [item for item in payload if isinstance(item, ConeDetection)]
         elif topic == TopicName.LOCALIZATION_EGO_POSE.value and isinstance(payload, EgoPose):
             self._latest_ego_pose = payload
         elif topic == TopicName.TICK_COMPLETE.value and isinstance(payload, dict):
@@ -99,7 +95,6 @@ class PygameLidarVisualizationService:
         self._draw_axes(anchor)
         self._draw_lidar_points(anchor)
         self._draw_detections(anchor)
-        self._draw_cones(anchor)
         self._draw_ego(anchor)
 
         info_lines = [
@@ -107,7 +102,6 @@ class PygameLidarVisualizationService:
             f"time: {self._latest_sim_time_s:.1f}s",
             f"points: {0 if self._latest_lidar is None else len(self._latest_lidar.points_xyz)}",
             f"detections: {len(self._latest_detections)}",
-            f"cones: {len(self._latest_cones)}",
         ]
         for index, line in enumerate(info_lines):
             surface = font.render(line, True, (220, 225, 235))
@@ -117,7 +111,6 @@ class PygameLidarVisualizationService:
             ("LiDAR points", (120, 200, 255)),
             ("Vehicle", (0, 229, 255)),
             ("Ped/Cyclist", (255, 196, 0)),
-            ("Cone", (255, 140, 64)),
         ]
         for index, (label, color) in enumerate(legend):
             y = 16 + (index * 22)
@@ -168,18 +161,6 @@ class PygameLidarVisualizationService:
                 continue
             color = self._detection_color(detection.object_class)
             pygame.draw.polygon(screen, color, corners, width=2)
-
-    def _draw_cones(self, anchor: np.ndarray) -> None:
-        pygame = self._pygame
-        screen = self._screen
-        if pygame is None or screen is None:
-            return
-        for cone in self._latest_cones:
-            ego_xy = self._world_to_ego_xy(np.asarray(cone.world_xyz, dtype=np.float32))
-            if ego_xy is None:
-                continue
-            x, y = self._ego_xy_to_screen(float(ego_xy[0]), float(ego_xy[1]), anchor)
-            pygame.draw.circle(screen, (255, 140, 64), (x, y), 5)
 
     def _draw_ego(self, anchor: np.ndarray) -> None:
         pygame = self._pygame

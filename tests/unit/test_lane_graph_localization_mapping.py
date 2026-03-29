@@ -5,7 +5,6 @@ import numpy as np
 from autonomy_demo.interfaces.enums import LaneLineType, ObjectClass, TrackState, TrafficLightState
 from autonomy_demo.interfaces.types import (
     CameraFrame,
-    ConeDetection,
     DrivableSpaceMask,
     EgoPose,
     GnssReading,
@@ -171,7 +170,7 @@ def test_mapping_module_returns_nearby_lane_graph_segments() -> None:
             class_probabilities=np.ones((8, 8), dtype=np.float32),
             source_sensor_id="front_camera",
         ),
-        cones=[ConeDetection(world_xyz=np.array([4.0, 0.5, 0.0], dtype=np.float32), confidence=1.0)],
+        cones=[],
         traffic_lights=[
             TrafficLightDetection(
                 world_xyz=np.array([20.0, 3.0, 3.0], dtype=np.float32),
@@ -189,7 +188,7 @@ def test_mapping_module_returns_nearby_lane_graph_segments() -> None:
     assert local_map.traffic_signal_states
 
 
-def test_mapping_module_requires_multiple_cones_ahead_to_close_current_lane() -> None:
+def test_mapping_module_ignores_cones_for_lane_closure() -> None:
     provider = _provider_with_single_lane()
     mapping = MapAwareMappingModule(provider, lane_horizon_radius_m=50.0, lane_limit=8)
     ego_pose = EgoPose(
@@ -210,42 +209,7 @@ def test_mapping_module_requires_multiple_cones_ahead_to_close_current_lane() ->
             class_probabilities=np.ones((8, 8), dtype=np.float32),
             source_sensor_id="front_camera",
         ),
-        cones=[
-            ConeDetection(world_xyz=np.array([10.0, 0.3, 0.0], dtype=np.float32), confidence=1.0),
-            ConeDetection(world_xyz=np.array([13.0, -0.2, 0.0], dtype=np.float32), confidence=1.0),
-        ],
-        traffic_lights=[],
-        ego_pose=ego_pose,
-    )
-    assert local_map.closed_lanes == ["road_1:section_0:lane_1"]
-
-
-def test_mapping_module_ignores_sidewalk_cones_for_lane_closure() -> None:
-    provider = _provider_with_single_lane()
-    mapping = MapAwareMappingModule(provider, lane_horizon_radius_m=50.0, lane_limit=8)
-    ego_pose = EgoPose(
-        world_xyz=np.array([5.0, 0.0, 0.0], dtype=np.float32),
-        yaw_rad=0.0,
-        speed_mps=8.0,
-        acceleration_mps2=0.0,
-        current_lane_id="road_1:section_0:lane_1",
-        frenet_s=5.0,
-        frenet_d=0.0,
-        heading_error_rad=0.0,
-    )
-    local_map = mapping.run(
-        detections=[],
-        lanes=[],
-        drivable_space=DrivableSpaceMask(
-            mask=np.ones((8, 8), dtype=bool),
-            class_probabilities=np.ones((8, 8), dtype=np.float32),
-            source_sensor_id="front_camera",
-        ),
-        cones=[
-            ConeDetection(world_xyz=np.array([12.0, 2.8, 0.0], dtype=np.float32), confidence=1.0),
-            ConeDetection(world_xyz=np.array([16.0, 3.1, 0.0], dtype=np.float32), confidence=1.0),
-            ConeDetection(world_xyz=np.array([20.0, 2.9, 0.0], dtype=np.float32), confidence=1.0),
-        ],
+        cones=[],
         traffic_lights=[],
         ego_pose=ego_pose,
     )

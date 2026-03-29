@@ -14,7 +14,7 @@ from autonomy_demo.interfaces.types import (
     StaticLaneSegment,
     TrafficLightDetection,
 )
-from autonomy_demo.mapping.lane_graph import LaneGraphProvider, parse_lane_id, project_point_to_centerline
+from autonomy_demo.mapping.lane_graph import LaneGraphProvider, parse_lane_id
 
 
 class MapAwareMappingModule:
@@ -52,11 +52,7 @@ class MapAwareMappingModule:
         if not static_lanes:
             static_lanes = self._fallback_static_lanes(lanes, ego_pose)
         temporary_boundaries = [lane for lane in lanes if lane.line_type == LaneLineType.TEMPORARY]
-        closed_lanes = self._cone_closed_lanes(
-            cones=cones,
-            static_lanes=static_lanes,
-            ego_pose=ego_pose,
-        )
+        closed_lanes: list[str] = []
         trigger_closed_lanes, trigger_boundaries = self._scenario_trigger_cues(
             ego_pose=ego_pose,
             static_lanes=static_lanes,
@@ -68,7 +64,7 @@ class MapAwareMappingModule:
         return LocalMap(
             static_lanes=static_lanes,
             dynamic_agents=detections,
-            cone_instances=cones,
+            cone_instances=[],
             temporary_boundaries=temporary_boundaries,
             closed_lanes=closed_lanes,
             traffic_signal_states=traffic_lights,
@@ -122,47 +118,6 @@ class MapAwareMappingModule:
                 speed_limit_mps=22.35,
             )
         ]
-
-    def _cone_closed_lanes(
-        self,
-        *,
-        cones: list[ConeDetection],
-        static_lanes: list[StaticLaneSegment],
-        ego_pose: EgoPose,
-    ) -> list[str]:
-        if not cones or not ego_pose.current_lane_id:
-            return []
-        current_lane = next(
-            (lane for lane in static_lanes if lane.lane_id == ego_pose.current_lane_id),
-            None,
-        )
-        if current_lane is None:
-            return []
-        ego_projection = project_point_to_centerline(current_lane.centerline_world, ego_pose.world_xyz)
-        if len(current_lane.left_boundary_world) and len(current_lane.right_boundary_world):
-            left_projection = project_point_to_centerline(
-                current_lane.centerline_world,
-                current_lane.left_boundary_world[0],
-            )
-            right_projection = project_point_to_centerline(
-                current_lane.centerline_world,
-                current_lane.right_boundary_world[0],
-            )
-            lane_half_width_m = max(abs(float(left_projection.d)), abs(float(right_projection.d)), 1.75)
-        else:
-            lane_half_width_m = 1.75
-        ahead_cones = 0
-        for cone in cones:
-            projection = project_point_to_centerline(current_lane.centerline_world, cone.world_xyz)
-            ahead_distance = float(projection.s - ego_projection.s)
-            if abs(float(projection.d)) > (lane_half_width_m * 0.75):
-                continue
-            if not (4.0 <= ahead_distance <= 30.0):
-                continue
-            ahead_cones += 1
-        if ahead_cones >= 2:
-            return [ego_pose.current_lane_id]
-        return []
 
     def _scenario_trigger_cues(
         self,

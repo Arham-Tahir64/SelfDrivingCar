@@ -42,12 +42,6 @@ export interface TrafficLightDetection {
     | "truth_fallback";
 }
 
-export interface ConeDetection {
-  world_xyz: number[];
-  confidence: number;
-  source_modality: "camera" | "lidar" | "fused" | "bootstrap";
-}
-
 export interface AgentPrediction {
   track_id: number;
   object_class: string;
@@ -91,7 +85,6 @@ export interface StaticLane {
 export interface LocalMap {
   static_lanes: StaticLane[];
   dynamic_agents: ObjectDetection[];
-  cone_instances: ConeDetection[];
   temporary_boundaries: LaneLine[];
   closed_lanes: string[];
   traffic_signal_states: TrafficLightDetection[];
@@ -110,7 +103,6 @@ export interface PerceptionStatus {
   counts_by_modality: Record<string, number>;
   active_camera_sensors: string[];
   detection_count: number;
-  cone_count: number;
   traffic_light_count: number;
 }
 
@@ -121,7 +113,6 @@ export interface PipelineFrame {
   "perception/detections"?: ObjectDetection[];
   "perception/lanes"?: LaneLine[];
   "perception/traffic_lights"?: TrafficLightDetection[];
-  "perception/cones"?: ConeDetection[];
   "map/local_map"?: LocalMap;
   "prediction/agents"?: AgentPrediction[];
   "planning/ego_trajectory"?: EgoTrajectory;

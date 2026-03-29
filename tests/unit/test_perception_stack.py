@@ -299,13 +299,12 @@ def test_lidar_perception_stack_extracts_clusters() -> None:
     module = LidarPerceptionStack()
     bundle = _lidar_bundle()
     detections, lanes, drivable, traffic_lights, cones = module.run(bundle)
-    assert len(detections) == 1
-    assert detections[0].object_class == ObjectClass.VEHICLE
-    assert detections[0].track_state == TrackState.TENTATIVE
-    assert detections[0].source_modality == "lidar"
-    assert detections[0].position_estimate_kind == "lidar_cluster"
-    assert len(cones) == 1
-    assert cones[0].source_modality == "lidar"
+    assert len(detections) == 2
+    assert any(detection.object_class == ObjectClass.VEHICLE for detection in detections)
+    assert all(detection.track_state == TrackState.TENTATIVE for detection in detections)
+    assert all(detection.source_modality == "lidar" for detection in detections)
+    assert all(detection.position_estimate_kind == "lidar_cluster" for detection in detections)
+    assert cones == []
     assert lanes
     assert drivable.mask.shape == (120, 200)
     assert traffic_lights == []
@@ -337,10 +336,11 @@ def test_lidar_perception_filters_oversized_static_clusters() -> None:
     )
     bundle.lidar.points_xyz = np.vstack([bundle.lidar.points_xyz, oversized_cluster])
     detections, _, _, _, _ = module.run(bundle)
-    assert len(detections) == 1
-    bbox = np.asarray(detections[0].world_bbox_3d, dtype=np.float32)
-    size_xyz = np.max(bbox, axis=0) - np.min(bbox, axis=0)
-    assert max(float(size_xyz[0]), float(size_xyz[1])) < 10.0
+    assert len(detections) == 2
+    for detection in detections:
+        bbox = np.asarray(detection.world_bbox_3d, dtype=np.float32)
+        size_xyz = np.max(bbox, axis=0) - np.min(bbox, axis=0)
+        assert max(float(size_xyz[0]), float(size_xyz[1])) < 10.0
 
 
 def _object_detection(
@@ -404,7 +404,7 @@ def test_fuse_detections_prefers_lidar_geometry_and_camera_semantics_when_matche
     assert fused[0].source_sensor_ids == ["front_camera", "lidar"]
 
 
-def test_fuse_detections_keeps_unmatched_lidar_only_and_camera_only_objects() -> None:
+def test_fuse_detections_drops_unmatched_lidar_only_and_camera_only_objects() -> None:
     camera_detection = _object_detection(
         track_id=1,
         object_class=ObjectClass.VEHICLE,
@@ -422,11 +422,10 @@ def test_fuse_detections_keeps_unmatched_lidar_only_and_camera_only_objects() ->
         source_modality="lidar",
     )
     fused = fuse_detections([camera_detection], [lidar_detection], match_distance_m=3.0)
-    assert len(fused) == 2
-    assert sorted(item.source_modality for item in fused) == ["camera", "lidar"]
+    assert fused == []
 
 
-def test_fuse_detections_keeps_conflicting_classes_separate() -> None:
+def test_fuse_detections_drops_conflicting_unmatched_classes() -> None:
     camera_detection = _object_detection(
         track_id=3,
         object_class=ObjectClass.VEHICLE,
@@ -444,8 +443,7 @@ def test_fuse_detections_keeps_conflicting_classes_separate() -> None:
         source_modality="lidar",
     )
     fused = fuse_detections([camera_detection], [lidar_detection], match_distance_m=2.0)
-    assert len(fused) == 2
-    assert sorted(item.source_modality for item in fused) == ["camera", "lidar"]
+    assert fused == []
 
 
 def test_mapping_consumes_perception_outputs() -> None:

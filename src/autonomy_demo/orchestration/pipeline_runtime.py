@@ -73,13 +73,12 @@ class PipelineRuntime:
                 bundle = self.sensors.capture(tick_id, sim_time_s)
                 self.context.event_bus.publish(TopicName.SENSOR_CAMERA_FRONT.value, bundle.front_camera)
                 self.context.event_bus.publish(TopicName.SENSOR_LIDAR.value, bundle.lidar)
-                detections, lanes, drivable_space, traffic_lights, cones = self.perception.run(bundle)
+                detections, lanes, drivable_space, traffic_lights, _cones = self.perception.run(bundle)
                 bundle.metadata["debug_perception_detections"] = detections
-                bundle.metadata["debug_perception_cones"] = cones
                 if self.visualization and hasattr(self.visualization, "update_bundle"):
                     self.visualization.update_bundle(bundle)
                 ego_pose = self.localization.run(bundle)
-                local_map = self.mapping.run(detections, lanes, drivable_space, cones, traffic_lights, ego_pose)
+                local_map = self.mapping.run(detections, lanes, drivable_space, [], traffic_lights, ego_pose)
                 predictions = self.prediction.run(local_map)
                 if hasattr(self.behavior_planner, "set_context"):
                     self.behavior_planner.set_context(local_map, predictions)
@@ -93,7 +92,6 @@ class PipelineRuntime:
                 self.context.event_bus.publish(TopicName.PERCEPTION_LANES.value, lanes)
                 self.context.event_bus.publish(TopicName.PERCEPTION_DRIVABLE_SPACE.value, drivable_space)
                 self.context.event_bus.publish(TopicName.PERCEPTION_TRAFFIC_LIGHTS.value, traffic_lights)
-                self.context.event_bus.publish(TopicName.PERCEPTION_CONES.value, cones)
                 if "perception_summary" in bundle.metadata:
                     self.context.event_bus.publish(
                         TopicName.PERCEPTION_STATUS.value,

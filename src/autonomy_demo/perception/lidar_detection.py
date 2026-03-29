@@ -6,7 +6,7 @@ from math import cos, sin
 import numpy as np
 
 from autonomy_demo.interfaces.enums import ObjectClass
-from autonomy_demo.interfaces.types import ConeDetection, SensorFrameBundle
+from autonomy_demo.interfaces.types import SensorFrameBundle
 from autonomy_demo.perception.internal_types import LidarClusterDetection
 
 
@@ -67,14 +67,13 @@ class LidarObstacleDetector:
     def detect(
         self,
         bundle: SensorFrameBundle,
-    ) -> tuple[list[LidarClusterDetection], list[ConeDetection]]:
+    ) -> list[LidarClusterDetection]:
         sensor_points = self._filtered_sensor_points(bundle.lidar.points_xyz)
         if len(sensor_points) == 0:
-            return [], []
+            return []
 
         world_points = self._sensor_to_world(sensor_points, bundle)
         detections: list[LidarClusterDetection] = []
-        cones: list[ConeDetection] = []
         for indices in self._cluster_indices(sensor_points[:, :2]):
             if len(indices) < self.min_cluster_points:
                 continue
@@ -85,10 +84,6 @@ class LidarObstacleDetector:
             if float(size_xyz[2]) < self.min_height_m:
                 continue
             centroid_xyz = np.mean(cluster_world, axis=0).astype(np.float32)
-            cone = self._maybe_cone(centroid_xyz, size_xyz, len(indices))
-            if cone is not None:
-                cones.append(cone)
-                continue
             object_class = self._classify_cluster(size_xyz)
             if not self._is_reasonable_dynamic_cluster(size_xyz, object_class):
                 continue
@@ -101,7 +96,7 @@ class LidarObstacleDetector:
                     point_count=len(indices),
                 )
             )
-        return detections, cones
+        return detections
 
     def _filtered_sensor_points(self, points_xyz: np.ndarray) -> np.ndarray:
         points = np.asarray(points_xyz, dtype=np.float32)
@@ -201,22 +196,6 @@ class LidarObstacleDetector:
             and minor_m <= self.max_vehicle_minor_m
             and height_m <= self.max_vehicle_height_m
         )
-
-    def _maybe_cone(
-        self,
-        centroid_xyz: np.ndarray,
-        size_xyz: np.ndarray,
-        point_count: int,
-    ) -> ConeDetection | None:
-        footprint_m = max(float(size_xyz[0]), float(size_xyz[1]))
-        height_m = float(size_xyz[2])
-        if footprint_m <= 0.9 and 0.2 <= height_m <= 1.2 and point_count <= 12:
-            return ConeDetection(
-                world_xyz=centroid_xyz.astype(np.float32),
-                confidence=0.8,
-                source_modality="lidar",
-            )
-        return None
 
     def _cluster_confidence(self, point_count: int, size_xyz: np.ndarray) -> float:
         confidence = 0.35 + (min(point_count, 20) / 30.0) + min(float(size_xyz[2]), 2.0) * 0.1

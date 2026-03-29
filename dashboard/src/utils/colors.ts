@@ -17,14 +17,10 @@ export const COLORS = {
   cyclistOpacity: 0.3,
   emergencyVehicle: new THREE.Color(1.0, 0.2, 0.2),
   emergencyOpacity: 0.5,
-  coneColor: new THREE.Color("#FF8A00"),
-  coneOpacity: 0.45,
   trafficLightRed: new THREE.Color("#ff4d4d"),
   trafficLightAmber: new THREE.Color("#ffbf2f"),
   trafficLightGreen: new THREE.Color("#3dff7a"),
   trafficLightOpacity: 0.55,
-
-  cone: "#FF6D00",
   laneLine: "#ffffff",
   laneLineOpacity: 0.5,
   closedLane: "#ff4444",
@@ -54,8 +50,6 @@ export function classColor(objectClass: string): THREE.Color {
       return COLORS.cyclist;
     case "emergency_vehicle":
       return COLORS.emergencyVehicle;
-    case "cone":
-      return COLORS.coneColor;
     case "traffic_light":
     case "traffic_light_red":
       return COLORS.trafficLightRed;
@@ -78,8 +72,6 @@ export function classOpacity(objectClass: string): number {
       return COLORS.cyclistOpacity;
     case "emergency_vehicle":
       return COLORS.emergencyOpacity;
-    case "cone":
-      return COLORS.coneOpacity;
     case "traffic_light":
     case "traffic_light_red":
     case "traffic_light_orange":

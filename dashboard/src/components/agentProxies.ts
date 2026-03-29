@@ -289,21 +289,6 @@ function buildTrafficLightProxy(
   return group;
 }
 
-function buildConeProxy(
-  bodyColor: THREE.Color,
-  outlineColor: THREE.Color,
-  opacity: number,
-) {
-  const group = new THREE.Group();
-  addOutlinedMesh(
-    group,
-    new THREE.ConeGeometry(0.14, 0.32, 8),
-    standardMaterial(bodyColor, opacity, outlineColor, 0.1),
-    outlineColor,
-  ).position.set(0.0, 0.16, 0.0);
-  return group;
-}
-
 function buildFallbackProxy(
   bodyColor: THREE.Color,
   outlineColor: THREE.Color,
@@ -349,9 +334,6 @@ export function buildAgentProxy(
     case "traffic_light_orange":
     case "traffic_light_green":
       return buildTrafficLightProxy(bodyColor, outlineColor, opacity);
-    case "cone":
-    case "traffic_cone":
-      return buildConeProxy(bodyColor, outlineColor, opacity);
     default:
       return buildFallbackProxy(bodyColor, outlineColor, opacity);
   }

@@ -108,7 +108,6 @@ class PygameCameraGridVisualizationService:
             tile_rect=lidar_rect,
             lidar_points=np.asarray(bundle.lidar.points_xyz, dtype=np.float32),
             detections=bundle.metadata.get("debug_perception_detections", []) or [],
-            cones=bundle.metadata.get("debug_perception_cones", []) or [],
             ego_xyz=np.asarray(bundle.gnss.world_xyz, dtype=np.float32),
             ego_yaw_rad=float(bundle.metadata.get("ego_yaw_rad", 0.0)),
         )
@@ -185,7 +184,6 @@ class PygameCameraGridVisualizationService:
         tile_rect,
         lidar_points: np.ndarray,
         detections: list[Any],
-        cones: list[Any],
         ego_xyz: np.ndarray,
         ego_yaw_rad: float,
     ) -> None:
@@ -225,12 +223,6 @@ class PygameCameraGridVisualizationService:
                 continue
             pygame.draw.polygon(screen, self._detection_color(getattr(detection, "object_class", "")), corners, width=2)
 
-        for cone in cones:
-            ego_xy = self._world_to_ego_xy(np.asarray(cone.world_xyz, dtype=np.float32), ego_xyz, ego_yaw_rad)
-            x, y = self._ego_xy_to_screen(float(ego_xy[0]), float(ego_xy[1]), anchor)
-            if content_rect.collidepoint(x, y):
-                pygame.draw.circle(screen, (255, 140, 64), (x, y), 5)
-
         ego_width = 1.9 * self._lidar_meters_to_pixels * 0.5
         ego_length = 4.6 * self._lidar_meters_to_pixels
         ego_points = [
@@ -242,7 +234,7 @@ class PygameCameraGridVisualizationService:
         pygame.draw.polygon(screen, (60, 220, 255), ego_points, width=2)
 
         screen.blit(title_font.render("LiDAR", True, (236, 240, 247)), (tile_rect.x + 14, tile_rect.y + 10))
-        meta = f"points:{len(lidar_points)} | det:{len(detections)} | cones:{len(cones)}"
+        meta = f"points:{len(lidar_points)} | det:{len(detections)}"
         screen.blit(font.render(meta, True, (147, 160, 184)), (tile_rect.x + 110, tile_rect.y + 14))
 
     def _draw_lidar_grid(self, content_rect, anchor: np.ndarray) -> None:
