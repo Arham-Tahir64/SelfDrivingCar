@@ -3,6 +3,7 @@ import { useFrame } from "@react-three/fiber";
 import * as THREE from "three";
 import { useFrameStore } from "../store/frameStore";
 import { classColor, classOpacity } from "../utils/colors";
+import { disposeObject3D } from "../utils/dispose";
 
 const AGENT_HEIGHT = 1.6;
 const DEFAULT_SIZE = new THREE.Vector3(4.5, AGENT_HEIGHT, 2.0);
@@ -37,21 +38,16 @@ function bboxSize(bbox: number[][]): THREE.Vector3 {
 
 export default function DetectedAgents() {
   const groupRef = useRef<THREE.Group>(null);
+  const lastTickRef = useRef<number | null>(null);
 
   useFrame(() => {
     const frame = useFrameStore.getState().currentFrame;
     const group = groupRef.current;
     if (!group) return;
+    if (!frame || lastTickRef.current === frame.tick_id) return;
+    lastTickRef.current = frame.tick_id;
 
-    // Clear previous
-    while (group.children.length > 0) {
-      const child = group.children[0];
-      group.remove(child);
-      if (child instanceof THREE.Mesh) {
-        child.geometry.dispose();
-        (child.material as THREE.Material).dispose();
-      }
-    }
+    disposeObject3D(group);
 
     const detections = frame?.["perception/detections"];
     if (!detections) return;

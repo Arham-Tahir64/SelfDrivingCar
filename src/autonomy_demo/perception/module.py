@@ -13,8 +13,14 @@ from autonomy_demo.interfaces.types import (
     TrafficLightDetection,
 )
 from autonomy_demo.perception.drivable_space import DrivableSpaceExtractor
-from autonomy_demo.perception.internal_types import TrackedDetection2D
+from autonomy_demo.perception.internal_types import (
+    FrameDetection2D,
+    TrackedDetection2D,
+    TrackedLidarClusterDetection,
+)
 from autonomy_demo.perception.lane_extraction import LaneExtractor
+from autonomy_demo.perception.lidar_detection import LidarObstacleDetector
+from autonomy_demo.perception.lidar_tracking import SimpleCentroidTracker3D
 from autonomy_demo.perception.object_detection import (
     YoloObjectDetector,
     bootstrap_annotations_from_metadata,
@@ -79,6 +85,7 @@ class PerceptionStack:
         self.lane_extractor = LaneExtractor()
         self.drivable_extractor = DrivableSpaceExtractor()
         self.logger = get_logger(__name__, perception_mode="camera_v1")
+        self._camera_order = ("front_camera", "left_camera", "right_camera", "rear_camera")
 
     def run(
         self, bundle: SensorFrameBundle
@@ -90,8 +97,7 @@ class PerceptionStack:
         list[ConeDetection],
     ]:
         try:
-            bootstrap_annotations = bootstrap_annotations_from_metadata(bundle.metadata)
-            detections_2d = self.detector.detect(bundle.front_camera.frame, bootstrap_annotations)
+            detections_2d = self._camera_detections(bundle)
             tracked_detections = self.tracker.update(detections_2d)
             lanes = self.lane_extractor.extract(bundle.front_camera.frame)
             drivable_space = self.drivable_extractor.extract(
@@ -103,12 +109,71 @@ class PerceptionStack:
             bundle.metadata["perception_detection_count"] = len(object_detections)
             bundle.metadata["perception_lane_count"] = len(lanes)
             bundle.metadata["perception_drivable_pixels"] = int(np.count_nonzero(drivable_space.mask))
+            bundle.metadata["perception_camera_detection_counts"] = self._camera_detection_counts(detections_2d)
+            bundle.metadata["perception_active_cameras"] = [
+                sensor_id
+                for sensor_id in self._camera_order
+                if getattr(bundle, sensor_id).status.value in {"OK", "DEGRADED"}
+            ]
             return object_detections, lanes, drivable_space, traffic_lights, []
         except Exception as exc:
             bundle.metadata["perception_status"] = "degraded"
             bundle.metadata["perception_error"] = str(exc)
             self.logger.warning("Perception degraded for tick %s: %s", bundle.tick_id, exc)
             return self._empty_outputs(bundle)
+
+    def _camera_detections(self, bundle: SensorFrameBundle) -> list[FrameDetection2D]:
+        detections_by_camera: list[FrameDetection2D] = []
+        for sensor_id in self._camera_order:
+            camera = getattr(bundle, sensor_id)
+            if camera.status.value == "OFFLINE":
+                continue
+            bootstrap_annotations = bootstrap_annotations_from_metadata(
+                bundle.metadata,
+                sensor_id=sensor_id,
+            )
+            detections_by_camera.extend(
+                self.detector.detect(
+                    camera.frame,
+                    bootstrap_annotations,
+                    sensor_id=sensor_id,
+                )
+            )
+        return self._merge_camera_detections(detections_by_camera)
+
+    def _merge_camera_detections(
+        self,
+        detections: list[FrameDetection2D],
+    ) -> list[FrameDetection2D]:
+        merged_by_track: dict[tuple[int, ObjectClass], FrameDetection2D] = {}
+        passthrough: list[FrameDetection2D] = []
+        for detection in detections:
+            if detection.preferred_track_id is None:
+                passthrough.append(detection)
+                continue
+            key = (int(detection.preferred_track_id), detection.object_class)
+            existing = merged_by_track.get(key)
+            if existing is None or self._camera_rank(detection) > self._camera_rank(existing) or (
+                self._camera_rank(detection) == self._camera_rank(existing)
+                and detection.confidence > existing.confidence
+            ):
+                merged_by_track[key] = detection
+        return list(merged_by_track.values()) + passthrough
+
+    def _camera_rank(self, detection: FrameDetection2D) -> int:
+        try:
+            return len(self._camera_order) - self._camera_order.index(detection.source_sensor_id)
+        except ValueError:
+            return 0
+
+    def _camera_detection_counts(
+        self,
+        detections: list[FrameDetection2D],
+    ) -> dict[str, int]:
+        counts = {sensor_id: 0 for sensor_id in self._camera_order}
+        for detection in detections:
+            counts[detection.source_sensor_id] = counts.get(detection.source_sensor_id, 0) + 1
+        return counts
 
     def _convert_tracked(
         self, detections: list[TrackedDetection2D]
@@ -173,10 +238,99 @@ class PerceptionStack:
         return [], [], drivable, [], []
 
 
+class LidarPerceptionStack:
+    """LiDAR-first perception v1 with deterministic clustering and centroid tracking."""
+
+    def __init__(self) -> None:
+        self.detector = LidarObstacleDetector()
+        self.tracker = SimpleCentroidTracker3D()
+        self.lane_extractor = LaneExtractor()
+        self.drivable_extractor = DrivableSpaceExtractor()
+        self.logger = get_logger(__name__, perception_mode="lidar_v1")
+
+    def run(
+        self, bundle: SensorFrameBundle
+    ) -> tuple[
+        list[ObjectDetection],
+        list[LaneLine],
+        DrivableSpaceMask,
+        list[TrafficLightDetection],
+        list[ConeDetection],
+    ]:
+        try:
+            detections_3d, cones = self.detector.detect(bundle)
+            tracked_detections = self.tracker.update(detections_3d, timestamp_s=float(bundle.sim_time_s))
+            lanes = self.lane_extractor.extract(bundle.front_camera.frame)
+            drivable_space = self.drivable_extractor.extract(
+                bundle.front_camera.frame,
+                bundle.front_camera.sensor_id,
+            )
+            object_detections = self._convert_tracked(tracked_detections)
+            bundle.metadata["perception_status"] = "ok"
+            bundle.metadata["perception_detection_count"] = len(object_detections)
+            bundle.metadata["perception_lane_count"] = len(lanes)
+            bundle.metadata["perception_drivable_pixels"] = int(np.count_nonzero(drivable_space.mask))
+            bundle.metadata["perception_lidar_cluster_count"] = len(detections_3d)
+            bundle.metadata["perception_cone_count"] = len(cones)
+            bundle.metadata["perception_active_cameras"] = [
+                sensor_id
+                for sensor_id in ("front_camera", "left_camera", "right_camera", "rear_camera")
+                if getattr(bundle, sensor_id).status.value in {"OK", "DEGRADED"}
+            ]
+            return object_detections, lanes, drivable_space, [], cones
+        except Exception as exc:
+            bundle.metadata["perception_status"] = "degraded"
+            bundle.metadata["perception_error"] = str(exc)
+            self.logger.warning("LiDAR perception degraded for tick %s: %s", bundle.tick_id, exc)
+            return self._empty_outputs(bundle)
+
+    def _convert_tracked(
+        self,
+        detections: list[TrackedLidarClusterDetection],
+    ) -> list[ObjectDetection]:
+        outputs: list[ObjectDetection] = []
+        for detection in detections:
+            outputs.append(
+                ObjectDetection(
+                    track_id=int(detection.track_id),
+                    object_class=detection.object_class,
+                    world_bbox_3d=np.asarray(detection.world_bbox_3d, dtype=np.float32),
+                    velocity=(
+                        np.asarray(detection.velocity_xyz, dtype=np.float32)
+                        if detection.velocity_xyz is not None
+                        else np.zeros(3, dtype=np.float32)
+                    ),
+                    confidence=float(detection.confidence),
+                    track_state=detection.track_state,
+                    image_bbox_xyxy=None,
+                )
+            )
+        return outputs
+
+    def _empty_outputs(
+        self, bundle: SensorFrameBundle
+    ) -> tuple[
+        list[ObjectDetection],
+        list[LaneLine],
+        DrivableSpaceMask,
+        list[TrafficLightDetection],
+        list[ConeDetection],
+    ]:
+        height, width = bundle.front_camera.frame.shape[:2]
+        drivable = DrivableSpaceMask(
+            mask=np.zeros((height, width), dtype=np.bool_),
+            class_probabilities=np.zeros((height, width, 2), dtype=np.float32),
+            source_sensor_id=bundle.front_camera.sensor_id,
+        )
+        return [], [], drivable, [], []
+
+
 def build_perception_module(runtime_config):
     if runtime_config.perception_mode == "camera_v1":
         return PerceptionStack(
             device=runtime_config.perception_device,
             model_variant=runtime_config.perception_model_variant,
         )
+    if runtime_config.perception_mode == "lidar_v1":
+        return LidarPerceptionStack()
     return StubPerceptionModule()

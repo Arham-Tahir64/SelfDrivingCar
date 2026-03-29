@@ -16,6 +16,7 @@ class FrameDetection2D:
     bbox_xyxy: FloatArray
     object_class: ObjectClass
     confidence: float
+    source_sensor_id: str = "front_camera"
     world_bbox_3d: FloatArray | None = None
     velocity_xyz: FloatArray | None = None
     world_xyz: FloatArray | None = None
@@ -27,3 +28,19 @@ class FrameDetection2D:
 class TrackedDetection2D(FrameDetection2D):
     track_id: int = -1
     track_state: TrackState = TrackState.TENTATIVE
+
+
+@dataclass(slots=True)
+class LidarClusterDetection:
+    centroid_xyz: FloatArray
+    world_bbox_3d: FloatArray
+    object_class: ObjectClass
+    confidence: float
+    point_count: int
+
+
+@dataclass(slots=True)
+class TrackedLidarClusterDetection(LidarClusterDetection):
+    track_id: int = -1
+    track_state: TrackState = TrackState.TENTATIVE
+    velocity_xyz: FloatArray | None = None

@@ -111,6 +111,7 @@ class SimpleSortTracker:
             bbox_xyxy=np.asarray(detection.bbox_xyxy, dtype=np.float32),
             object_class=detection.object_class,
             confidence=float(detection.confidence),
+            source_sensor_id=detection.source_sensor_id,
             world_bbox_3d=None if detection.world_bbox_3d is None else np.asarray(detection.world_bbox_3d, dtype=np.float32),
             velocity_xyz=None if detection.velocity_xyz is None else np.asarray(detection.velocity_xyz, dtype=np.float32),
             world_xyz=None if detection.world_xyz is None else np.asarray(detection.world_xyz, dtype=np.float32),

@@ -94,9 +94,15 @@ class YoloObjectDetector:
         self._model: Any | None = None
         self._load_error: str | None = None
 
-    def detect(self, frame: np.ndarray, bootstrap_annotations: list[BootstrapAnnotation]) -> list[FrameDetection2D]:
+    def detect(
+        self,
+        frame: np.ndarray,
+        bootstrap_annotations: list[BootstrapAnnotation],
+        *,
+        sensor_id: str = "front_camera",
+    ) -> list[FrameDetection2D]:
         if self.model_variant.strip().lower() in {"", "bootstrap", "none"}:
-            return self._from_bootstrap(bootstrap_annotations)
+            return self._from_bootstrap(bootstrap_annotations, sensor_id=sensor_id)
         if self._model is None and self._load_error is None:
             try:
                 from ultralytics import YOLO  # type: ignore
@@ -104,9 +110,9 @@ class YoloObjectDetector:
                 self._model = YOLO(self.model_variant)
             except Exception as exc:  # pragma: no cover - depends on optional runtime deps
                 self._load_error = str(exc)
-                return self._from_bootstrap(bootstrap_annotations)
+                return self._from_bootstrap(bootstrap_annotations, sensor_id=sensor_id)
         if self._model is None:
-            return self._from_bootstrap(bootstrap_annotations)
+            return self._from_bootstrap(bootstrap_annotations, sensor_id=sensor_id)
         try:
             results = self._model.predict(
                 source=frame.astype(np.uint8),
@@ -114,15 +120,15 @@ class YoloObjectDetector:
                 verbose=False,
             )
         except Exception:  # pragma: no cover - depends on optional runtime deps
-            return self._from_bootstrap(bootstrap_annotations)
+            return self._from_bootstrap(bootstrap_annotations, sensor_id=sensor_id)
         if not results:
-            return self._from_bootstrap(bootstrap_annotations)
+            return self._from_bootstrap(bootstrap_annotations, sensor_id=sensor_id)
         result = results[0]
         boxes = getattr(result, "boxes", None)
         names = getattr(result, "names", {})
         detections: list[FrameDetection2D] = []
         if boxes is None:
-            return self._from_bootstrap(bootstrap_annotations)
+            return self._from_bootstrap(bootstrap_annotations, sensor_id=sensor_id)
         for box in boxes:
             cls_idx = int(box.cls[0].item())
             label = str(names.get(cls_idx, cls_idx))
@@ -138,6 +144,7 @@ class YoloObjectDetector:
                         bbox_xyxy=bbox_xyxy,
                         object_class=object_class,
                         confidence=confidence,
+                        source_sensor_id=sensor_id,
                         world_bbox_3d=matched.world_bbox_3d,
                         velocity_xyz=matched.velocity_xyz,
                         world_xyz=matched.world_xyz,
@@ -152,6 +159,7 @@ class YoloObjectDetector:
                     bbox_xyxy=bbox_xyxy,
                     object_class=object_class,
                     confidence=confidence,
+                    source_sensor_id=sensor_id,
                     world_bbox_3d=world_bbox,
                     velocity_xyz=velocity_xyz,
                     world_xyz=world_xyz,
@@ -159,12 +167,18 @@ class YoloObjectDetector:
             )
         return detections
 
-    def _from_bootstrap(self, annotations: list[BootstrapAnnotation]) -> list[FrameDetection2D]:
+    def _from_bootstrap(
+        self,
+        annotations: list[BootstrapAnnotation],
+        *,
+        sensor_id: str,
+    ) -> list[FrameDetection2D]:
         return [
             FrameDetection2D(
                 bbox_xyxy=np.asarray(annotation.image_bbox_xyxy, dtype=np.float32),
                 object_class=annotation.object_class,
                 confidence=float(annotation.confidence),
+                source_sensor_id=sensor_id,
                 world_bbox_3d=np.asarray(annotation.world_bbox_3d, dtype=np.float32),
                 velocity_xyz=np.asarray(annotation.velocity_xyz, dtype=np.float32),
                 world_xyz=np.asarray(annotation.world_xyz, dtype=np.float32),
@@ -206,9 +220,18 @@ class YoloObjectDetector:
         )
 
 
-def bootstrap_annotations_from_metadata(metadata: dict[str, Any]) -> list[BootstrapAnnotation]:
+def bootstrap_annotations_from_metadata(
+    metadata: dict[str, Any],
+    *,
+    sensor_id: str = "front_camera",
+) -> list[BootstrapAnnotation]:
     annotations: list[BootstrapAnnotation] = []
-    for annotation in metadata.get("carla_actor_annotations", []):
+    camera_annotations = metadata.get("carla_camera_annotations", {})
+    if isinstance(camera_annotations, dict) and sensor_id in camera_annotations:
+        source_annotations = camera_annotations.get(sensor_id, [])
+    else:
+        source_annotations = metadata.get("carla_actor_annotations", [])
+    for annotation in source_annotations:
         label = annotation.get("object_class")
         object_class = label if isinstance(label, ObjectClass) else ObjectClass(str(label))
         traffic_state = annotation.get("traffic_light_state")

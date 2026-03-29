@@ -27,7 +27,19 @@ class SensorManager:
     def capture(self, tick_id: int, sim_time_s: float) -> SensorFrameBundle:
         image = np.full((32, 32, 3), fill_value=tick_id, dtype=np.float32)
         lidar_points = np.array(
-            [[0.0, 0.0, 0.0], [5.0, 1.0, 0.2], [10.0, -1.0, 0.1]], dtype=np.float32
+            [
+                [7.5, 1.2, 0.1],
+                [7.8, 1.0, 0.5],
+                [8.1, 1.4, 1.0],
+                [8.5, 1.1, 1.4],
+                [8.7, 1.5, 0.9],
+                [8.9, 0.9, 0.2],
+                [12.0, -1.5, 0.1],
+                [12.1, -1.4, 0.4],
+                [12.2, -1.6, 0.7],
+                [0.0, 0.0, -2.2],
+            ],
+            dtype=np.float32,
         )
         radar = np.array([[12.0, 0.1, 0.0, 1.2]], dtype=np.float32)
         return SensorFrameBundle(

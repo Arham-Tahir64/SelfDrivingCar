@@ -20,10 +20,23 @@ export function useWebSocket() {
   const setConnected = useFrameStore((s) => s.setConnected);
   const wsRef = useRef<WebSocket | null>(null);
   const retriesRef = useRef(0);
+  const pendingFrameRef = useRef<PipelineFrame | null>(null);
+  const rafRef = useRef<number | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     let timeout: ReturnType<typeof setTimeout>;
+
+    function flushPendingFrame() {
+      const frame = pendingFrameRef.current;
+      pendingFrameRef.current = null;
+      if (frame) {
+        pushFrame(frame);
+      }
+      if (!cancelled) {
+        rafRef.current = window.requestAnimationFrame(flushPendingFrame);
+      }
+    }
 
     function connect() {
       if (cancelled) return;
@@ -38,7 +51,7 @@ export function useWebSocket() {
       ws.onmessage = (ev) => {
         try {
           const frame: PipelineFrame = JSON.parse(ev.data);
-          pushFrame(frame);
+          pendingFrameRef.current = frame;
         } catch {
           // skip malformed messages
         }
@@ -62,10 +75,14 @@ export function useWebSocket() {
     }
 
     connect();
+    rafRef.current = window.requestAnimationFrame(flushPendingFrame);
 
     return () => {
       cancelled = true;
       clearTimeout(timeout);
+      if (rafRef.current !== null) {
+        window.cancelAnimationFrame(rafRef.current);
+      }
       wsRef.current?.close();
     };
   }, [pushFrame, setConnected]);

@@ -20,7 +20,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sensor-config", default="configs/sensors.default.yaml")
     parser.add_argument("--backend", choices=["stub", "carla"], default=None)
     parser.add_argument("--max-ticks", type=int, default=None)
-    parser.add_argument("--perception-mode", choices=["stub", "camera_v1"], default=None)
+    parser.add_argument("--perception-mode", choices=["stub", "camera_v1", "lidar_v1"], default=None)
     parser.add_argument("--perception-device", default=None)
     parser.add_argument("--perception-model-variant", default=None)
     parser.add_argument("--visualize", action="store_true")

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from typing import Any
 
 from autonomy_demo.common.logging import get_logger
@@ -30,6 +31,9 @@ class WebSocketBridge:
         self._event_bus: Any | None = None
         self._clients: set[Any] = set()
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._pending_text: str | None = None
+        self._broadcast_active = False
+        self._broadcast_lock = threading.Lock()
 
     # -- VisualizationSink protocol ------------------------------------------
 
@@ -78,9 +82,26 @@ class WebSocketBridge:
             logger.exception("Failed to serialize tick %s", tick_id)
             return
         if self._loop is not None:
-            asyncio.run_coroutine_threadsafe(self._broadcast(text), self._loop)
+            should_schedule = False
+            with self._broadcast_lock:
+                self._pending_text = text
+                if not self._broadcast_active:
+                    self._broadcast_active = True
+                    should_schedule = True
+            if should_schedule:
+                asyncio.run_coroutine_threadsafe(self._drain_pending(), self._loop)
 
-    async def _broadcast(self, text: str) -> None:
+    async def _drain_pending(self) -> None:
+        while True:
+            with self._broadcast_lock:
+                text = self._pending_text
+                self._pending_text = None
+                if text is None:
+                    self._broadcast_active = False
+                    return
+            await self._broadcast_once(text)
+
+    async def _broadcast_once(self, text: str) -> None:
         stale: list[Any] = []
         for ws in self._clients:
             try:

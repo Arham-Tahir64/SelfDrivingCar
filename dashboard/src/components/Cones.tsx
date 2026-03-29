@@ -3,6 +3,7 @@ import { useFrame } from "@react-three/fiber";
 import * as THREE from "three";
 import { useFrameStore } from "../store/frameStore";
 import { COLORS } from "../utils/colors";
+import { disposeObject3D } from "../utils/dispose";
 
 const CONE_COLOR = new THREE.Color(COLORS.cone);
 const CONE_RADIUS = 0.3;
@@ -10,20 +11,16 @@ const CONE_HEIGHT = 0.7;
 
 export default function Cones() {
   const groupRef = useRef<THREE.Group>(null);
+  const lastTickRef = useRef<number | null>(null);
 
   useFrame(() => {
     const frame = useFrameStore.getState().currentFrame;
     const group = groupRef.current;
     if (!group) return;
+    if (!frame || lastTickRef.current === frame.tick_id) return;
+    lastTickRef.current = frame.tick_id;
 
-    while (group.children.length > 0) {
-      const child = group.children[0];
-      group.remove(child);
-      if (child instanceof THREE.Mesh) {
-        child.geometry.dispose();
-        (child.material as THREE.Material).dispose();
-      }
-    }
+    disposeObject3D(group);
 
     const cones = frame?.["perception/cones"];
     const mapCones = frame?.["map/local_map"]?.cone_instances;
