@@ -195,9 +195,23 @@ class _FakeResult:
         self.names = {0: "car"}
 
 
+class _FakeAliasResult:
+    def __init__(self) -> None:
+        self.boxes = [
+            _FakeBox([88.0, 72.0, 136.0, 110.0], 0.92, 0),
+            _FakeBox([140.0, 15.0, 155.0, 55.0], 0.85, 1),
+        ]
+        self.names = {0: "vehicle", 1: "traffic_light_red"}
+
+
 class _FakeModel:
     def predict(self, source, device, verbose):  # noqa: ANN001
         return [_FakeResult()]
+
+
+class _FakeAliasModel:
+    def predict(self, source, device, verbose):  # noqa: ANN001
+        return [_FakeAliasResult()]
 
 
 def test_perception_stack_prefers_camera_mode_when_yolo_is_available() -> None:
@@ -213,6 +227,20 @@ def test_perception_stack_prefers_camera_mode_when_yolo_is_available() -> None:
     assert detections[0].position_estimate_kind == "camera_projection"
     assert traffic_lights == []
     assert bundle.metadata["perception_summary"].fallback_state == "camera_only"
+
+
+def test_perception_stack_supports_custom_model_label_aliases() -> None:
+    module = PerceptionStack(device="cpu", model_variant="auto")
+    module.detector._model = _FakeAliasModel()
+    bundle = _bundle()
+    bundle.left_camera.status = SensorStatus.OFFLINE
+    bundle.right_camera.status = SensorStatus.OFFLINE
+    bundle.rear_camera.status = SensorStatus.OFFLINE
+    detections, _, _, traffic_lights, _ = module.run(bundle)
+    assert len(detections) == 1
+    assert detections[0].object_class == ObjectClass.VEHICLE
+    assert len(traffic_lights) == 1
+    assert traffic_lights[0].state.value == "RED"
 
 
 def test_tracker_confirms_persistent_tracks() -> None:
@@ -291,6 +319,28 @@ def test_lidar_perception_tracker_confirms_persistent_clusters() -> None:
     assert first_detections[0].track_state == TrackState.TENTATIVE
     assert second_detections[0].track_state == TrackState.CONFIRMED
     assert second_detections[0].track_id == first_detections[0].track_id
+
+
+def test_lidar_perception_filters_oversized_static_clusters() -> None:
+    module = LidarPerceptionStack()
+    bundle = _lidar_bundle()
+    oversized_cluster = np.array(
+        [
+            [12.0, 2.0, 0.2],
+            [20.0, 2.0, 0.4],
+            [20.0, 5.5, 1.2],
+            [12.0, 5.5, 1.0],
+            [16.0, 3.5, 2.8],
+            [18.0, 4.5, 3.4],
+        ],
+        dtype=np.float32,
+    )
+    bundle.lidar.points_xyz = np.vstack([bundle.lidar.points_xyz, oversized_cluster])
+    detections, _, _, _, _ = module.run(bundle)
+    assert len(detections) == 1
+    bbox = np.asarray(detections[0].world_bbox_3d, dtype=np.float32)
+    size_xyz = np.max(bbox, axis=0) - np.min(bbox, axis=0)
+    assert max(float(size_xyz[0]), float(size_xyz[1])) < 10.0
 
 
 def _object_detection(

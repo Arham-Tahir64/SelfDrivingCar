@@ -72,6 +72,29 @@ def _lead_detection(x: float, y: float = 0.0, speed: float = 1.0) -> ObjectDetec
     )
 
 
+def _oversized_detection(track_id: int, x: float, y: float, length: float, width: float, height: float) -> ObjectDetection:
+    return ObjectDetection(
+        track_id=track_id,
+        object_class=ObjectClass.VEHICLE,
+        world_bbox_3d=np.array(
+            [
+                [x - (length / 2.0), y - (width / 2.0), 0.0],
+                [x + (length / 2.0), y - (width / 2.0), 0.0],
+                [x + (length / 2.0), y + (width / 2.0), 0.0],
+                [x - (length / 2.0), y + (width / 2.0), 0.0],
+                [x - (length / 2.0), y - (width / 2.0), height],
+                [x + (length / 2.0), y - (width / 2.0), height],
+                [x + (length / 2.0), y + (width / 2.0), height],
+                [x - (length / 2.0), y + (width / 2.0), height],
+            ],
+            dtype=np.float32,
+        ),
+        velocity=np.zeros(3, dtype=np.float32),
+        confidence=0.95,
+        track_state=TrackState.CONFIRMED,
+    )
+
+
 def test_behavior_planner_transitions_for_merge_and_red_and_goal() -> None:
     planner = RuleBasedBehaviorPlanner()
     planner.goal_xyz = np.array([40.0, 0.0, 0.0], dtype=np.float32)
@@ -199,3 +222,35 @@ def test_controller_emergency_override_triggers_for_close_lead_prediction() -> N
     command = controller.run(trajectory, _ego_pose())
     assert command.emergency_override is True
     assert command.brake >= 0.9
+
+
+def test_controller_ignores_oversized_false_positive_detection_for_emergency_override() -> None:
+    controller = RouteFollowerController()
+    local_map = LocalMap(
+        static_lanes=[_lane("road_1:section_0:lane_1", 0.0)],
+        dynamic_agents=[_oversized_detection(track_id=21, x=5.0, y=0.0, length=18.0, width=6.0, height=6.0)],
+        cone_instances=[],
+        temporary_boundaries=[],
+        closed_lanes=[],
+        traffic_signal_states=[],
+        drivable_space=None,
+    )
+    prediction = AgentPrediction(
+        track_id=21,
+        object_class=ObjectClass.VEHICLE,
+        predicted_trajectory=[
+            Waypoint(x=5.0, y=0.0, yaw=0.0, velocity=0.0, timestamp=0.0),
+            Waypoint(x=5.5, y=0.0, yaw=0.0, velocity=0.0, timestamp=0.2),
+        ],
+        confidence_by_step=[0.9, 0.9],
+    )
+    controller.set_context(local_map, [prediction])
+    trajectory = FrenetMotionPlanner(horizon_steps=4, dt_s=0.2, cruise_speed_mps=8.0).run(
+        local_map,
+        _ego_pose(),
+        [],
+        BehaviorState.LANE_KEEP,
+    )
+    command = controller.run(trajectory, _ego_pose())
+    assert command.emergency_override is False
+    assert command.brake < 0.9

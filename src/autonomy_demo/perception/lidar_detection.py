@@ -38,6 +38,15 @@ class LidarObstacleDetector:
         max_range_m: float = 60.0,
         min_height_m: float = 0.35,
         ground_z_threshold_m: float = -1.5,
+        max_vehicle_major_m: float = 10.0,
+        max_vehicle_minor_m: float = 4.5,
+        max_vehicle_height_m: float = 4.5,
+        max_cyclist_major_m: float = 3.0,
+        max_cyclist_minor_m: float = 1.5,
+        max_cyclist_height_m: float = 2.5,
+        max_pedestrian_major_m: float = 1.5,
+        max_pedestrian_minor_m: float = 1.5,
+        max_pedestrian_height_m: float = 2.5,
     ) -> None:
         self.cell_size_m = cell_size_m
         self.min_cluster_points = min_cluster_points
@@ -45,6 +54,15 @@ class LidarObstacleDetector:
         self.max_range_m = max_range_m
         self.min_height_m = min_height_m
         self.ground_z_threshold_m = ground_z_threshold_m
+        self.max_vehicle_major_m = max_vehicle_major_m
+        self.max_vehicle_minor_m = max_vehicle_minor_m
+        self.max_vehicle_height_m = max_vehicle_height_m
+        self.max_cyclist_major_m = max_cyclist_major_m
+        self.max_cyclist_minor_m = max_cyclist_minor_m
+        self.max_cyclist_height_m = max_cyclist_height_m
+        self.max_pedestrian_major_m = max_pedestrian_major_m
+        self.max_pedestrian_minor_m = max_pedestrian_minor_m
+        self.max_pedestrian_height_m = max_pedestrian_height_m
 
     def detect(
         self,
@@ -71,11 +89,14 @@ class LidarObstacleDetector:
             if cone is not None:
                 cones.append(cone)
                 continue
+            object_class = self._classify_cluster(size_xyz)
+            if not self._is_reasonable_dynamic_cluster(size_xyz, object_class):
+                continue
             detections.append(
                 LidarClusterDetection(
                     centroid_xyz=centroid_xyz,
                     world_bbox_3d=_bbox_corners(min_xyz, max_xyz),
-                    object_class=self._classify_cluster(size_xyz),
+                    object_class=object_class,
                     confidence=self._cluster_confidence(len(indices), size_xyz),
                     point_count=len(indices),
                 )
@@ -154,6 +175,32 @@ class LidarObstacleDetector:
         if footprint_m < 1.5:
             return ObjectClass.CYCLIST
         return ObjectClass.VEHICLE
+
+    def _is_reasonable_dynamic_cluster(
+        self,
+        size_xyz: np.ndarray,
+        object_class: ObjectClass,
+    ) -> bool:
+        major_m = float(max(size_xyz[0], size_xyz[1]))
+        minor_m = float(min(size_xyz[0], size_xyz[1]))
+        height_m = float(size_xyz[2])
+        if object_class == ObjectClass.PEDESTRIAN:
+            return (
+                major_m <= self.max_pedestrian_major_m
+                and minor_m <= self.max_pedestrian_minor_m
+                and height_m <= self.max_pedestrian_height_m
+            )
+        if object_class == ObjectClass.CYCLIST:
+            return (
+                major_m <= self.max_cyclist_major_m
+                and minor_m <= self.max_cyclist_minor_m
+                and height_m <= self.max_cyclist_height_m
+            )
+        return (
+            major_m <= self.max_vehicle_major_m
+            and minor_m <= self.max_vehicle_minor_m
+            and height_m <= self.max_vehicle_height_m
+        )
 
     def _maybe_cone(
         self,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from typing import Any
 from collections import Counter
 
 import numpy as np
@@ -83,6 +84,24 @@ def _record_perception_metadata(
     bundle.metadata["perception_drivable_pixels"] = int(np.count_nonzero(drivable_space.mask))
     bundle.metadata["perception_active_cameras"] = list(status_summary.active_camera_sensors)
     bundle.metadata["perception_summary"] = status_summary
+
+
+def _serialize_camera_detections_by_sensor(
+    detections_by_sensor: dict[str, list[FrameDetection2D]],
+) -> dict[str, list[dict[str, Any]]]:
+    serialized: dict[str, list[dict[str, Any]]] = {}
+    for sensor_id, detections in detections_by_sensor.items():
+        serialized[sensor_id] = [
+            {
+                "bbox_xyxy": np.asarray(detection.bbox_xyxy, dtype=np.float32).tolist(),
+                "object_class": detection.object_class.value,
+                "confidence": float(detection.confidence),
+                "source_modality": str(detection.source_modality),
+                "source_sensor_id": str(detection.source_sensor_id),
+            }
+            for detection in detections
+        ]
+    return serialized
 
 
 def _empty_outputs(
@@ -198,7 +217,13 @@ class PerceptionStack(_CameraSceneContextMixin):
         list[ConeDetection],
     ]:
         try:
-            object_detections, traffic_lights, fallback_state, active_camera_sensors = self.detect_dynamic(bundle)
+            (
+                object_detections,
+                traffic_lights,
+                fallback_state,
+                active_camera_sensors,
+                camera_detection_debug,
+            ) = self.detect_dynamic(bundle)
             lanes, drivable_space = self._scene_context(
                 bundle,
                 lane_extractor=self.lane_extractor,
@@ -225,18 +250,20 @@ class PerceptionStack(_CameraSceneContextMixin):
                 object_detections,
                 traffic_lights,
             )
+            bundle.metadata["perception_camera_detections"] = camera_detection_debug
             return object_detections, lanes, drivable_space, traffic_lights, []
         except Exception as exc:
             bundle.metadata["perception_status"] = "degraded"
             bundle.metadata["perception_error"] = str(exc)
+            bundle.metadata["perception_camera_detections"] = {}
             self.logger.warning("Perception degraded for tick %s: %s", bundle.tick_id, exc)
             return _empty_outputs(bundle)
 
     def detect_dynamic(
         self,
         bundle: SensorFrameBundle,
-    ) -> tuple[list[ObjectDetection], list[TrafficLightDetection], str, list[str]]:
-        detections_2d, detector_modes, active_camera_sensors = self._camera_detections(bundle)
+    ) -> tuple[list[ObjectDetection], list[TrafficLightDetection], str, list[str], dict[str, list[dict[str, Any]]]]:
+        detections_2d, detector_modes, active_camera_sensors, detections_by_sensor = self._camera_detections(bundle)
         tracked_detections = self.tracker.update(detections_2d)
         object_detections, traffic_lights = self._convert_tracked(tracked_detections)
         return (
@@ -244,15 +271,17 @@ class PerceptionStack(_CameraSceneContextMixin):
             traffic_lights,
             self._camera_fallback_state(detector_modes),
             active_camera_sensors,
+            _serialize_camera_detections_by_sensor(detections_by_sensor),
         )
 
     def _camera_detections(
         self,
         bundle: SensorFrameBundle,
-    ) -> tuple[list[FrameDetection2D], dict[str, str], list[str]]:
+    ) -> tuple[list[FrameDetection2D], dict[str, str], list[str], dict[str, list[FrameDetection2D]]]:
         detections_by_camera: list[FrameDetection2D] = []
         detector_modes: dict[str, str] = {}
         active_camera_sensors: list[str] = []
+        detections_by_sensor: dict[str, list[FrameDetection2D]] = {}
         for sensor_id in self._camera_order:
             camera = getattr(bundle, sensor_id)
             if camera.status.value == "OFFLINE":
@@ -270,8 +299,14 @@ class PerceptionStack(_CameraSceneContextMixin):
                 ego_yaw_rad=float(bundle.metadata.get("ego_yaw_rad", 0.0)),
             )
             detector_modes[sensor_id] = detector_mode
+            detections_by_sensor[sensor_id] = list(detections)
             detections_by_camera.extend(detections)
-        return self._merge_camera_detections(detections_by_camera), detector_modes, active_camera_sensors
+        return (
+            self._merge_camera_detections(detections_by_camera),
+            detector_modes,
+            active_camera_sensors,
+            detections_by_sensor,
+        )
 
     def _merge_camera_detections(
         self,
@@ -421,10 +456,12 @@ class LidarPerceptionStack(_CameraSceneContextMixin):
             )
             bundle.metadata["perception_lidar_cluster_count"] = len(object_detections)
             bundle.metadata["perception_cone_count"] = len(cones)
+            bundle.metadata["perception_camera_detections"] = {}
             return object_detections, lanes, drivable_space, [], cones
         except Exception as exc:
             bundle.metadata["perception_status"] = "degraded"
             bundle.metadata["perception_error"] = str(exc)
+            bundle.metadata["perception_camera_detections"] = {}
             self.logger.warning("LiDAR perception degraded for tick %s: %s", bundle.tick_id, exc)
             return _empty_outputs(bundle)
 
@@ -483,7 +520,7 @@ class FusedPerceptionStack(_CameraSceneContextMixin):
         list[ConeDetection],
     ]:
         try:
-            camera_detections, traffic_lights, camera_fallback_state, active_camera_sensors = (
+            camera_detections, traffic_lights, camera_fallback_state, active_camera_sensors, camera_detection_debug = (
                 self.camera_stack.detect_dynamic(bundle)
             )
             lidar_detections, cones = self.lidar_stack.detect_dynamic(bundle)
@@ -514,10 +551,12 @@ class FusedPerceptionStack(_CameraSceneContextMixin):
                 cones=cones,
                 status_summary=status_summary,
             )
+            bundle.metadata["perception_camera_detections"] = camera_detection_debug
             return fused_objects, lanes, drivable_space, traffic_lights, cones
         except Exception as exc:
             bundle.metadata["perception_status"] = "degraded"
             bundle.metadata["perception_error"] = str(exc)
+            bundle.metadata["perception_camera_detections"] = {}
             self.logger.warning("Fused perception degraded for tick %s: %s", bundle.tick_id, exc)
             return _empty_outputs(bundle)
 

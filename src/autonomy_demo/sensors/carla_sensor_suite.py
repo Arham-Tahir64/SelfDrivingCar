@@ -99,7 +99,10 @@ class CarlaSensorSuite:
         if sensor_name == "front_camera":
             return carla.Transform(carla.Location(x=2.3, z=0.8))
         if sensor_name == "rear_camera":
-            return carla.Transform(carla.Location(x=-2.0, z=1.0), carla.Rotation(yaw=180.0))
+            return carla.Transform(
+                carla.Location(x=-2.6, z=1.35),
+                carla.Rotation(yaw=180.0, pitch=-4.0),
+            )
         if sensor_name == "left_camera":
             return carla.Transform(carla.Location(y=-0.8, z=1.0), carla.Rotation(yaw=-90.0))
         if sensor_name == "right_camera":

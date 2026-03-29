@@ -27,8 +27,8 @@ class PygameLidarVisualizationService:
         self._latest_ego_pose: EgoPose | None = None
         self._latest_tick_id = -1
         self._latest_sim_time_s = 0.0
-        self._size = (960, 960)
-        self._meters_to_pixels = 9.0
+        self._size = (780, 780)
+        self._meters_to_pixels = 7.0
 
     def attach(self, event_bus) -> None:
         if not self._enabled:

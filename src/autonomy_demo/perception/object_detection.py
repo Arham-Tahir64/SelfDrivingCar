@@ -11,20 +11,37 @@ from autonomy_demo.perception.internal_types import FrameDetection2D
 
 _YOLO_CLASS_MAP = {
     "car": ObjectClass.VEHICLE,
+    "vehicle": ObjectClass.VEHICLE,
     "truck": ObjectClass.VEHICLE,
     "bus": ObjectClass.VEHICLE,
     "motorcycle": ObjectClass.CYCLIST,
+    "motobike": ObjectClass.CYCLIST,
     "bicycle": ObjectClass.CYCLIST,
+    "bike": ObjectClass.CYCLIST,
     "person": ObjectClass.PEDESTRIAN,
     "pedestrian": ObjectClass.PEDESTRIAN,
     "traffic_light": ObjectClass.TRAFFIC_LIGHT,
     "traffic light": ObjectClass.TRAFFIC_LIGHT,
     "traffic-light": ObjectClass.TRAFFIC_LIGHT,
+    "traffic_light_red": ObjectClass.TRAFFIC_LIGHT,
+    "traffic_light_orange": ObjectClass.TRAFFIC_LIGHT,
+    "traffic_light_green": ObjectClass.TRAFFIC_LIGHT,
 }
 
 
 def _object_class_from_label(label: str) -> ObjectClass | None:
     return _YOLO_CLASS_MAP.get(label.strip().lower())
+
+
+def _traffic_light_state_from_label(label: str) -> TrafficLightState | None:
+    normalized = label.strip().lower()
+    if normalized in {"traffic_light_red", "traffic light red", "traffic-light-red"}:
+        return TrafficLightState.RED
+    if normalized in {"traffic_light_orange", "traffic_light_amber", "traffic light orange", "traffic light amber"}:
+        return TrafficLightState.AMBER
+    if normalized in {"traffic_light_green", "traffic light green", "traffic-light-green"}:
+        return TrafficLightState.GREEN
+    return None
 
 
 def _sensor_mount(sensor_id: str) -> tuple[np.ndarray, float]:
@@ -199,6 +216,7 @@ class YoloObjectDetector:
                     world_bbox_3d=world_bbox,
                     velocity_xyz=velocity_xyz,
                     world_xyz=world_xyz,
+                    traffic_light_state=_traffic_light_state_from_label(label),
                 )
             )
         return detections, "camera"

@@ -1,6 +1,6 @@
 runtime:
   backend: stub
-  tick_hz: 20
+  tick_hz: 10
   max_ticks: 0
   output_dir: outputs
   log_level: INFO
@@ -11,7 +11,7 @@ carla:
   host: 127.0.0.1
   port: 2000
   timeout_s: 30.0
-  sync_fps: 20
+  sync_fps: 10
   carla_root: C:\Users\Arham\Desktop\CARLA_0.9.16
   python_api_wheel: C:\Users\Arham\Desktop\CARLA_0.9.16\PythonAPI\carla\dist\carla-0.9.16-cp312-cp312-win_amd64.whl
   launch_executable: C:\Users\Arham\Desktop\CARLA_0.9.16\CarlaUE4.exe
@@ -26,9 +26,9 @@ perception:
   model_variant: CarlaObject26.pt
 evaluation:
   latency_budget_ms:
-    perception: 60
+    perception: 100
     localization: 5
     mapping: 10
-    prediction: 15
-    planning: 20
+    prediction: 20
+    planning: 25
     control: 5

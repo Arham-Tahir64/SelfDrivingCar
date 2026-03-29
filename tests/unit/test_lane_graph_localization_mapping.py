@@ -95,6 +95,53 @@ def test_map_aware_localization_populates_lane_and_frenet() -> None:
     assert abs(ego_pose.heading_error_rad) < 1e-6
 
 
+def test_lane_graph_prefers_same_height_lane_for_nearest_projection() -> None:
+    lane_graph = LaneGraph(
+        segments={
+            "highway": StaticLaneSegment(
+                lane_id="highway",
+                centerline_world=np.array([[0.0, 0.0, 10.0], [20.0, 0.0, 10.0]], dtype=np.float32),
+                speed_limit_mps=20.0,
+            ),
+            "underpass": StaticLaneSegment(
+                lane_id="underpass",
+                centerline_world=np.array([[0.0, 0.4, 0.0], [20.0, 0.4, 0.0]], dtype=np.float32),
+                speed_limit_mps=20.0,
+            ),
+        }
+    )
+    projection = lane_graph.nearest_projection(np.array([5.0, 0.3, 10.2], dtype=np.float32))
+    assert projection is not None
+    assert projection.lane_id == "highway"
+
+
+def test_lane_graph_nearby_lanes_filters_out_stacked_roads() -> None:
+    lane_graph = LaneGraph(
+        segments={
+            "highway_main": StaticLaneSegment(
+                lane_id="highway_main",
+                centerline_world=np.array([[0.0, 0.0, 12.0], [20.0, 0.0, 12.0]], dtype=np.float32),
+                speed_limit_mps=20.0,
+            ),
+            "highway_adjacent": StaticLaneSegment(
+                lane_id="highway_adjacent",
+                centerline_world=np.array([[0.0, 3.5, 12.1], [20.0, 3.5, 12.1]], dtype=np.float32),
+                speed_limit_mps=20.0,
+            ),
+            "lower_road": StaticLaneSegment(
+                lane_id="lower_road",
+                centerline_world=np.array([[0.0, 0.1, 0.5], [20.0, 0.1, 0.5]], dtype=np.float32),
+                speed_limit_mps=20.0,
+            ),
+        }
+    )
+    nearby = lane_graph.nearby_lanes(np.array([5.0, 0.2, 12.0], dtype=np.float32), radius_m=10.0, limit=8)
+    lane_ids = {lane.lane_id for lane in nearby}
+    assert "highway_main" in lane_ids
+    assert "highway_adjacent" in lane_ids
+    assert "lower_road" not in lane_ids
+
+
 def test_mapping_module_returns_nearby_lane_graph_segments() -> None:
     provider = _provider_with_single_lane()
     mapping = MapAwareMappingModule(provider, lane_horizon_radius_m=50.0, lane_limit=8)
@@ -138,8 +185,71 @@ def test_mapping_module_returns_nearby_lane_graph_segments() -> None:
     assert local_map.static_lanes
     assert local_map.static_lanes[0].lane_id == "road_1:section_0:lane_1"
     assert local_map.temporary_boundaries
-    assert local_map.closed_lanes == ["road_1:section_0:lane_1"]
+    assert local_map.closed_lanes == []
     assert local_map.traffic_signal_states
+
+
+def test_mapping_module_requires_multiple_cones_ahead_to_close_current_lane() -> None:
+    provider = _provider_with_single_lane()
+    mapping = MapAwareMappingModule(provider, lane_horizon_radius_m=50.0, lane_limit=8)
+    ego_pose = EgoPose(
+        world_xyz=np.array([5.0, 0.0, 0.0], dtype=np.float32),
+        yaw_rad=0.0,
+        speed_mps=8.0,
+        acceleration_mps2=0.0,
+        current_lane_id="road_1:section_0:lane_1",
+        frenet_s=5.0,
+        frenet_d=0.0,
+        heading_error_rad=0.0,
+    )
+    local_map = mapping.run(
+        detections=[],
+        lanes=[],
+        drivable_space=DrivableSpaceMask(
+            mask=np.ones((8, 8), dtype=bool),
+            class_probabilities=np.ones((8, 8), dtype=np.float32),
+            source_sensor_id="front_camera",
+        ),
+        cones=[
+            ConeDetection(world_xyz=np.array([10.0, 0.3, 0.0], dtype=np.float32), confidence=1.0),
+            ConeDetection(world_xyz=np.array([13.0, -0.2, 0.0], dtype=np.float32), confidence=1.0),
+        ],
+        traffic_lights=[],
+        ego_pose=ego_pose,
+    )
+    assert local_map.closed_lanes == ["road_1:section_0:lane_1"]
+
+
+def test_mapping_module_ignores_sidewalk_cones_for_lane_closure() -> None:
+    provider = _provider_with_single_lane()
+    mapping = MapAwareMappingModule(provider, lane_horizon_radius_m=50.0, lane_limit=8)
+    ego_pose = EgoPose(
+        world_xyz=np.array([5.0, 0.0, 0.0], dtype=np.float32),
+        yaw_rad=0.0,
+        speed_mps=8.0,
+        acceleration_mps2=0.0,
+        current_lane_id="road_1:section_0:lane_1",
+        frenet_s=5.0,
+        frenet_d=0.0,
+        heading_error_rad=0.0,
+    )
+    local_map = mapping.run(
+        detections=[],
+        lanes=[],
+        drivable_space=DrivableSpaceMask(
+            mask=np.ones((8, 8), dtype=bool),
+            class_probabilities=np.ones((8, 8), dtype=np.float32),
+            source_sensor_id="front_camera",
+        ),
+        cones=[
+            ConeDetection(world_xyz=np.array([12.0, 2.8, 0.0], dtype=np.float32), confidence=1.0),
+            ConeDetection(world_xyz=np.array([16.0, 3.1, 0.0], dtype=np.float32), confidence=1.0),
+            ConeDetection(world_xyz=np.array([20.0, 2.9, 0.0], dtype=np.float32), confidence=1.0),
+        ],
+        traffic_lights=[],
+        ego_pose=ego_pose,
+    )
+    assert local_map.closed_lanes == []
 
 
 def test_lane_aware_prediction_follows_lane_centerline() -> None:

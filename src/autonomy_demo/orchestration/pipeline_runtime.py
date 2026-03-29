@@ -74,6 +74,10 @@ class PipelineRuntime:
                 self.context.event_bus.publish(TopicName.SENSOR_CAMERA_FRONT.value, bundle.front_camera)
                 self.context.event_bus.publish(TopicName.SENSOR_LIDAR.value, bundle.lidar)
                 detections, lanes, drivable_space, traffic_lights, cones = self.perception.run(bundle)
+                bundle.metadata["debug_perception_detections"] = detections
+                bundle.metadata["debug_perception_cones"] = cones
+                if self.visualization and hasattr(self.visualization, "update_bundle"):
+                    self.visualization.update_bundle(bundle)
                 ego_pose = self.localization.run(bundle)
                 local_map = self.mapping.run(detections, lanes, drivable_space, cones, traffic_lights, ego_pose)
                 predictions = self.prediction.run(local_map)

@@ -25,6 +25,8 @@ from autonomy_demo.prediction.module import build_prediction_module
 from autonomy_demo.replay.writer import Hdf5OrJsonReplayWriter
 from autonomy_demo.sensors.carla_sensor_suite import CarlaSensorSuite
 from autonomy_demo.sensors.sensor_manager import SensorManager
+from autonomy_demo.visualization.composite import CompositeVisualizationSink
+from autonomy_demo.visualization.pygame_camera_grid_view import PygameCameraGridVisualizationService
 from autonomy_demo.visualization.pygame_lidar_view import PygameLidarVisualizationService
 from autonomy_demo.sim.backends import CarlaSimulationBackend, StubSimulationBackend
 from autonomy_demo.visualization.service import NullVisualizationService
@@ -121,18 +123,25 @@ class ScenarioRunner:
             latency_budget_ms=self.runtime_config.latency_budget_ms,
         )
         replay_writer = Hdf5OrJsonReplayWriter(self.output_dir) if record else None
-        if lidar_view:
-            visualization = PygameLidarVisualizationService(output_dir=self.output_dir)
-        elif visualize:
+        visualization_sinks = []
+        if visualize:
             bridge = WebSocketBridge()
             start_server_thread(
                 bridge,
                 host=self.runtime_config.ws_host,
                 port=self.runtime_config.ws_port,
             )
-            visualization = bridge
-        else:
+            visualization_sinks.append(bridge)
+            visualization_sinks.append(PygameCameraGridVisualizationService(output_dir=self.output_dir))
+        if lidar_view:
+            visualization_sinks.append(PygameLidarVisualizationService(output_dir=self.output_dir))
+
+        if not visualization_sinks:
             visualization = NullVisualizationService(enabled=False, output_dir=self.output_dir)
+        elif len(visualization_sinks) == 1:
+            visualization = visualization_sinks[0]
+        else:
+            visualization = CompositeVisualizationSink(visualization_sinks)
         perception = build_perception_module(self.runtime_config)
         lane_graph_provider = LaneGraphProvider()
         localization = build_localization_module(self.runtime_config, lane_graph_provider)

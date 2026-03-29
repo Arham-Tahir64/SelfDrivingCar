@@ -5,9 +5,9 @@ import { useFrameStore } from "../store/frameStore";
 import { classColor, classOpacity, modalityColor } from "../utils/colors";
 import { disposeObject3D } from "../utils/dispose";
 import { worldToScene } from "../utils/scene";
+import { buildAgentProxy } from "./agentProxies";
 
-const AGENT_HEIGHT = 1.6;
-const DEFAULT_SIZE = new THREE.Vector3(4.5, AGENT_HEIGHT, 2.0);
+const DEFAULT_SIZE = new THREE.Vector3(4.5, 1.6, 2.0);
 
 function bboxCentroid(bbox: number[][]): THREE.Vector3 {
   if (!bbox || bbox.length === 0) return new THREE.Vector3();
@@ -70,29 +70,15 @@ export default function DetectedAgents() {
       const opacity = classOpacity(det.object_class);
       const outlineColor = modalityColor(det.source_modality);
       const sceneCenter = worldToScene([centroid.x, centroid.y, centroid.z]);
-
-      const geom = new THREE.BoxGeometry(size.x, size.y, size.z);
-      const mat = new THREE.MeshStandardMaterial({
-        color,
-        transparent: true,
-        opacity,
-        depthWrite: false,
-        emissive: outlineColor,
-        emissiveIntensity: det.source_modality === "fused" ? 0.18 : 0.08,
-      });
-      const mesh = new THREE.Mesh(geom, mat);
-      mesh.position.set(sceneCenter.x, size.y / 2, sceneCenter.z);
-
-      const edgesGeom = new THREE.EdgesGeometry(geom);
-      const edgesMat = new THREE.LineBasicMaterial({
-        color: outlineColor,
-        transparent: true,
-        opacity: 0.95,
-      });
-      const edges = new THREE.LineSegments(edgesGeom, edgesMat);
-      mesh.add(edges);
-
-      group.add(mesh);
+      const displaySize = new THREE.Vector3(
+        Math.max(size.x, 0.6),
+        Math.max(size.y, 0.6),
+        Math.max(size.z, 0.6),
+      );
+      const proxy = buildAgentProxy(det.object_class, color, outlineColor, opacity);
+      proxy.position.set(sceneCenter.x, 0.02, sceneCenter.z);
+      proxy.scale.set(displaySize.x, displaySize.y, displaySize.z);
+      group.add(proxy);
     }
   });
 

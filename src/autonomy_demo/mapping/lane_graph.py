@@ -54,18 +54,28 @@ class LaneGraph:
         world_xyz: np.ndarray,
         *,
         candidate_lane_ids: list[str] | None = None,
+        max_height_delta_m: float = 4.0,
     ) -> FrenetProjection | None:
         lane_ids = candidate_lane_ids or list(self.segments.keys())
-        best: FrenetProjection | None = None
+        filtered: list[tuple[float, FrenetProjection]] = []
+        fallback: list[tuple[float, float, FrenetProjection]] = []
         for lane_id in lane_ids:
             segment = self.segments.get(lane_id)
             if segment is None or len(segment.centerline_world) < 2:
                 continue
             projection = project_point_to_centerline(segment.centerline_world, world_xyz)
             projection.lane_id = segment.lane_id
-            if best is None or projection.distance_m < best.distance_m:
-                best = projection
-        return best
+            height_delta_m = float(abs(float(projection.nearest_xyz[2]) - float(world_xyz[2])))
+            fallback.append((height_delta_m, projection.distance_m, projection))
+            if height_delta_m <= max_height_delta_m:
+                filtered.append((projection.distance_m, projection))
+        if filtered:
+            filtered.sort(key=lambda item: item[0])
+            return filtered[0][1]
+        if not fallback:
+            return None
+        fallback.sort(key=lambda item: (item[0], item[1]))
+        return fallback[0][2]
 
     def nearby_lanes(
         self,
@@ -73,14 +83,22 @@ class LaneGraph:
         *,
         radius_m: float = 60.0,
         limit: int = 12,
+        max_height_delta_m: float = 4.0,
     ) -> list[StaticLaneSegment]:
-        ranked: list[tuple[float, StaticLaneSegment]] = []
+        filtered: list[tuple[float, StaticLaneSegment]] = []
+        fallback: list[tuple[float, float, StaticLaneSegment]] = []
         for segment in self.segments.values():
             projection = project_point_to_centerline(segment.centerline_world, world_xyz)
             if projection.distance_m <= radius_m:
-                ranked.append((projection.distance_m, segment))
-        ranked.sort(key=lambda item: item[0])
-        return [segment for _, segment in ranked[:limit]]
+                height_delta_m = float(abs(float(projection.nearest_xyz[2]) - float(world_xyz[2])))
+                fallback.append((height_delta_m, projection.distance_m, segment))
+                if height_delta_m <= max_height_delta_m:
+                    filtered.append((projection.distance_m, segment))
+        if filtered:
+            filtered.sort(key=lambda item: item[0])
+            return [segment for _, segment in filtered[:limit]]
+        fallback.sort(key=lambda item: (item[0], item[1]))
+        return [segment for _, _, segment in fallback[:limit]]
 
 
 class LaneGraphProvider:
