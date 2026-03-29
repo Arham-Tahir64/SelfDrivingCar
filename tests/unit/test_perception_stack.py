@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import numpy as np
 
-from autonomy_demo.interfaces.enums import ObjectClass, TrackState
-from autonomy_demo.interfaces.types import CameraFrame, GnssReading, ImuReading, LidarFrame, RadarFrame, SensorFrameBundle
+from autonomy_demo.interfaces.enums import ObjectClass, SensorStatus, TrackState
+from autonomy_demo.interfaces.types import CameraFrame, GnssReading, ImuReading, LidarFrame, ObjectDetection, RadarFrame, SensorFrameBundle
 from autonomy_demo.mapping.module import StubMappingModule
-from autonomy_demo.perception.module import LidarPerceptionStack, PerceptionStack, build_perception_module
+from autonomy_demo.perception.fusion import fuse_detections
+from autonomy_demo.perception.module import FusedPerceptionStack, LidarPerceptionStack, PerceptionStack, build_perception_module
 
 
 def _bundle() -> SensorFrameBundle:
@@ -131,17 +132,87 @@ def test_build_perception_module_supports_lidar_mode() -> None:
     assert isinstance(module, LidarPerceptionStack)
 
 
+def test_build_perception_module_supports_fused_mode() -> None:
+    runtime = type(
+        "Runtime",
+        (),
+        {"perception_mode": "fused_v1", "perception_device": "cpu", "perception_model_variant": "bootstrap"},
+    )()
+    module = build_perception_module(runtime)
+    assert isinstance(module, FusedPerceptionStack)
+
+
 def test_perception_stack_converts_bootstrap_annotations() -> None:
     module = PerceptionStack(device="cpu", model_variant="bootstrap")
-    detections, lanes, drivable, traffic_lights, cones = module.run(_bundle())
+    bundle = _bundle()
+    detections, lanes, drivable, traffic_lights, cones = module.run(bundle)
     assert len(detections) == 1
     assert detections[0].track_id == 10
     assert detections[0].track_state == TrackState.TENTATIVE
     assert detections[0].image_bbox_xyxy is not None
+    assert detections[0].source_modality == "bootstrap"
+    assert detections[0].position_estimate_kind == "truth_fallback"
     assert lanes
     assert drivable.mask.shape == (120, 200)
     assert len(traffic_lights) == 1
+    assert traffic_lights[0].source_modality == "bootstrap"
     assert cones == []
+    assert bundle.metadata["perception_summary"].fallback_state == "bootstrap"
+
+
+class _Scalar:
+    def __init__(self, value: float) -> None:
+        self._value = value
+
+    def item(self) -> float:
+        return float(self._value)
+
+
+class _TensorArray:
+    def __init__(self, values: list[float]) -> None:
+        self._values = np.asarray(values, dtype=np.float32)
+
+    def detach(self):
+        return self
+
+    def cpu(self):
+        return self
+
+    def numpy(self) -> np.ndarray:
+        return np.asarray(self._values, dtype=np.float32)
+
+
+class _FakeBox:
+    def __init__(self, bbox_xyxy: list[float], confidence: float, cls_idx: int) -> None:
+        self.xyxy = [_TensorArray(bbox_xyxy)]
+        self.conf = [_Scalar(confidence)]
+        self.cls = [_Scalar(cls_idx)]
+
+
+class _FakeResult:
+    def __init__(self) -> None:
+        self.boxes = [_FakeBox([88.0, 72.0, 136.0, 110.0], 0.92, 0)]
+        self.names = {0: "car"}
+
+
+class _FakeModel:
+    def predict(self, source, device, verbose):  # noqa: ANN001
+        return [_FakeResult()]
+
+
+def test_perception_stack_prefers_camera_mode_when_yolo_is_available() -> None:
+    module = PerceptionStack(device="cpu", model_variant="auto")
+    module.detector._model = _FakeModel()
+    bundle = _bundle()
+    bundle.left_camera.status = SensorStatus.OFFLINE
+    bundle.right_camera.status = SensorStatus.OFFLINE
+    bundle.rear_camera.status = SensorStatus.OFFLINE
+    detections, _, _, traffic_lights, _ = module.run(bundle)
+    assert len(detections) == 1
+    assert detections[0].source_modality == "camera"
+    assert detections[0].position_estimate_kind == "camera_projection"
+    assert traffic_lights == []
+    assert bundle.metadata["perception_summary"].fallback_state == "camera_only"
 
 
 def test_tracker_confirms_persistent_tracks() -> None:
@@ -198,14 +269,19 @@ def test_perception_stack_degrades_without_crashing() -> None:
 
 def test_lidar_perception_stack_extracts_clusters() -> None:
     module = LidarPerceptionStack()
-    detections, lanes, drivable, traffic_lights, cones = module.run(_lidar_bundle())
+    bundle = _lidar_bundle()
+    detections, lanes, drivable, traffic_lights, cones = module.run(bundle)
     assert len(detections) == 1
     assert detections[0].object_class == ObjectClass.VEHICLE
     assert detections[0].track_state == TrackState.TENTATIVE
+    assert detections[0].source_modality == "lidar"
+    assert detections[0].position_estimate_kind == "lidar_cluster"
     assert len(cones) == 1
+    assert cones[0].source_modality == "lidar"
     assert lanes
     assert drivable.mask.shape == (120, 200)
     assert traffic_lights == []
+    assert bundle.metadata["perception_summary"].fallback_state == "lidar_only"
 
 
 def test_lidar_perception_tracker_confirms_persistent_clusters() -> None:
@@ -215,6 +291,111 @@ def test_lidar_perception_tracker_confirms_persistent_clusters() -> None:
     assert first_detections[0].track_state == TrackState.TENTATIVE
     assert second_detections[0].track_state == TrackState.CONFIRMED
     assert second_detections[0].track_id == first_detections[0].track_id
+
+
+def _object_detection(
+    *,
+    track_id: int,
+    object_class: ObjectClass,
+    center_x: float,
+    center_y: float,
+    confidence: float,
+    source_modality: str,
+) -> ObjectDetection:
+    return ObjectDetection(
+        track_id=track_id,
+        object_class=object_class,
+        world_bbox_3d=np.array(
+            [
+                [center_x - 1.0, center_y - 0.5, 0.0],
+                [center_x + 1.0, center_y - 0.5, 0.0],
+                [center_x + 1.0, center_y + 0.5, 0.0],
+                [center_x - 1.0, center_y + 0.5, 0.0],
+                [center_x - 1.0, center_y - 0.5, 1.5],
+                [center_x + 1.0, center_y - 0.5, 1.5],
+                [center_x + 1.0, center_y + 0.5, 1.5],
+                [center_x - 1.0, center_y + 0.5, 1.5],
+            ],
+            dtype=np.float32,
+        ),
+        velocity=np.zeros(3, dtype=np.float32),
+        confidence=confidence,
+        track_state=TrackState.CONFIRMED,
+        image_bbox_xyxy=np.array([50.0, 50.0, 90.0, 90.0], dtype=np.float32),
+        source_modality=source_modality,
+        source_sensor_ids=["front_camera"] if source_modality != "lidar" else ["lidar"],
+        position_estimate_kind="camera_projection" if source_modality != "lidar" else "lidar_cluster",
+    )
+
+
+def test_fuse_detections_prefers_lidar_geometry_and_camera_semantics_when_matched() -> None:
+    camera_detection = _object_detection(
+        track_id=10,
+        object_class=ObjectClass.PEDESTRIAN,
+        center_x=12.0,
+        center_y=1.0,
+        confidence=0.9,
+        source_modality="camera",
+    )
+    lidar_detection = _object_detection(
+        track_id=20,
+        object_class=ObjectClass.CYCLIST,
+        center_x=12.5,
+        center_y=1.2,
+        confidence=0.7,
+        source_modality="lidar",
+    )
+    fused = fuse_detections([camera_detection], [lidar_detection])
+    assert len(fused) == 1
+    assert fused[0].source_modality == "fused"
+    assert fused[0].track_id == 20
+    assert fused[0].object_class == ObjectClass.PEDESTRIAN
+    assert fused[0].position_estimate_kind == "fusion"
+    assert fused[0].source_sensor_ids == ["front_camera", "lidar"]
+
+
+def test_fuse_detections_keeps_unmatched_lidar_only_and_camera_only_objects() -> None:
+    camera_detection = _object_detection(
+        track_id=1,
+        object_class=ObjectClass.VEHICLE,
+        center_x=5.0,
+        center_y=0.0,
+        confidence=0.8,
+        source_modality="camera",
+    )
+    lidar_detection = _object_detection(
+        track_id=2,
+        object_class=ObjectClass.VEHICLE,
+        center_x=20.0,
+        center_y=0.0,
+        confidence=0.8,
+        source_modality="lidar",
+    )
+    fused = fuse_detections([camera_detection], [lidar_detection], match_distance_m=3.0)
+    assert len(fused) == 2
+    assert sorted(item.source_modality for item in fused) == ["camera", "lidar"]
+
+
+def test_fuse_detections_keeps_conflicting_classes_separate() -> None:
+    camera_detection = _object_detection(
+        track_id=3,
+        object_class=ObjectClass.VEHICLE,
+        center_x=10.0,
+        center_y=0.0,
+        confidence=0.8,
+        source_modality="camera",
+    )
+    lidar_detection = _object_detection(
+        track_id=4,
+        object_class=ObjectClass.PEDESTRIAN,
+        center_x=10.2,
+        center_y=0.1,
+        confidence=0.8,
+        source_modality="lidar",
+    )
+    fused = fuse_detections([camera_detection], [lidar_detection], match_distance_m=2.0)
+    assert len(fused) == 2
+    assert sorted(item.source_modality for item in fused) == ["camera", "lidar"]
 
 
 def test_mapping_consumes_perception_outputs() -> None:

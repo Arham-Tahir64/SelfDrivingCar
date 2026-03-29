@@ -58,6 +58,7 @@ class TopicName(str, Enum):
     PERCEPTION_DRIVABLE_SPACE = "perception/drivable_space"
     PERCEPTION_TRAFFIC_LIGHTS = "perception/traffic_lights"
     PERCEPTION_CONES = "perception/cones"
+    PERCEPTION_STATUS = "perception/status"
     LOCALIZATION_EGO_POSE = "localization/ego_pose"
     MAP_LOCAL_MAP = "map/local_map"
     PREDICTION_AGENTS = "prediction/agents"

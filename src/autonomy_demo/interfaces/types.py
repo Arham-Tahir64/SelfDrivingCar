@@ -111,11 +111,15 @@ class ObjectDetection:
     confidence: float
     track_state: TrackState
     image_bbox_xyxy: FloatArray | None = None
+    source_modality: str = "bootstrap"
+    source_sensor_ids: list[str] = field(default_factory=list)
+    position_estimate_kind: str = "truth_fallback"
 
     def __post_init__(self) -> None:
         self.object_class = ObjectClass(self.object_class)
         self.world_bbox_3d = _float_array(self.world_bbox_3d, (8, 3))
         self.velocity = _float_array(self.velocity, (3,))
+        self.source_sensor_ids = list(self.source_sensor_ids)
         if self.image_bbox_xyxy is not None:
             self.image_bbox_xyxy = _float_array(self.image_bbox_xyxy, (4,))
         if not 0.0 <= self.confidence <= 1.0:
@@ -126,6 +130,7 @@ class ObjectDetection:
 class ConeDetection:
     world_xyz: FloatArray
     confidence: float
+    source_modality: str = "bootstrap"
 
     def __post_init__(self) -> None:
         self.world_xyz = _float_array(self.world_xyz, (3,))
@@ -157,9 +162,13 @@ class TrafficLightDetection:
     stop_line_distance_m: float
     confidence: float
     image_bbox_xyxy: FloatArray | None = None
+    source_modality: str = "bootstrap"
+    source_sensor_ids: list[str] = field(default_factory=list)
+    position_estimate_kind: str = "truth_fallback"
 
     def __post_init__(self) -> None:
         self.world_xyz = _float_array(self.world_xyz, (3,))
+        self.source_sensor_ids = list(self.source_sensor_ids)
         if self.image_bbox_xyxy is not None:
             self.image_bbox_xyxy = _float_array(self.image_bbox_xyxy, (4,))
 
@@ -280,6 +289,17 @@ class ControlCommand:
     hand_brake: bool = False
     reverse: bool = False
     emergency_override: bool = False
+
+
+@dataclass(slots=True)
+class PerceptionStatus:
+    active_mode: str
+    fallback_state: str
+    counts_by_modality: dict[str, int] = field(default_factory=dict)
+    active_camera_sensors: list[str] = field(default_factory=list)
+    detection_count: int = 0
+    cone_count: int = 0
+    traffic_light_count: int = 0
 
 
 @dataclass(slots=True)

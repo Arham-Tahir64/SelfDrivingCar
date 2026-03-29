@@ -189,9 +189,9 @@ class PygameLidarVisualizationService:
         ego_width = 1.9 * self._meters_to_pixels * 0.5
         ego_length = 4.6 * self._meters_to_pixels
         points = [
-            (anchor[0], anchor[1] - ego_length * 0.7),
-            (anchor[0] - ego_width, anchor[1] + ego_length * 0.3),
-            (anchor[0] + ego_width, anchor[1] + ego_length * 0.3),
+            (int(anchor[0]), int(anchor[1] - ego_length * 0.7)),
+            (int(anchor[0] - ego_width), int(anchor[1] + ego_length * 0.3)),
+            (int(anchor[0] + ego_width), int(anchor[1] + ego_length * 0.3)),
         ]
         pygame.draw.polygon(screen, (240, 245, 250), points)
         pygame.draw.polygon(screen, (60, 220, 255), points, width=2)

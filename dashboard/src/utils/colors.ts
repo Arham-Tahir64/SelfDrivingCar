@@ -31,6 +31,11 @@ export const COLORS = {
   trafficRed: "#ff0000",
   trafficAmber: "#ffc800",
   trafficGreen: "#00ff00",
+
+  modalityCamera: "#4DD0E1",
+  modalityLidar: "#FFB300",
+  modalityFused: "#7CFF6B",
+  modalityBootstrap: "#FF5C8A",
 } as const;
 
 export function classColor(objectClass: string): THREE.Color {
@@ -60,5 +65,35 @@ export function classOpacity(objectClass: string): number {
       return COLORS.emergencyOpacity;
     default:
       return 0.3;
+  }
+}
+
+export function modalityColor(modality: string): THREE.Color {
+  switch (modality) {
+    case "camera":
+      return new THREE.Color(COLORS.modalityCamera);
+    case "lidar":
+      return new THREE.Color(COLORS.modalityLidar);
+    case "fused":
+      return new THREE.Color(COLORS.modalityFused);
+    case "bootstrap":
+      return new THREE.Color(COLORS.modalityBootstrap);
+    default:
+      return new THREE.Color(0.85, 0.85, 0.85);
+  }
+}
+
+export function modalityColorCss(modality: string): string {
+  switch (modality) {
+    case "camera":
+      return COLORS.modalityCamera;
+    case "lidar":
+      return COLORS.modalityLidar;
+    case "fused":
+      return COLORS.modalityFused;
+    case "bootstrap":
+      return COLORS.modalityBootstrap;
+    default:
+      return "#dddddd";
   }
 }

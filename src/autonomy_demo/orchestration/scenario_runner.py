@@ -25,6 +25,7 @@ from autonomy_demo.prediction.module import build_prediction_module
 from autonomy_demo.replay.writer import Hdf5OrJsonReplayWriter
 from autonomy_demo.sensors.carla_sensor_suite import CarlaSensorSuite
 from autonomy_demo.sensors.sensor_manager import SensorManager
+from autonomy_demo.visualization.pygame_lidar_view import PygameLidarVisualizationService
 from autonomy_demo.sim.backends import CarlaSimulationBackend, StubSimulationBackend
 from autonomy_demo.visualization.service import NullVisualizationService
 from autonomy_demo.visualization.websocket_bridge import WebSocketBridge
@@ -93,7 +94,14 @@ class ScenarioRunner:
         metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
         return metadata_path
 
-    def run(self, scenario, visualize: bool, record: bool) -> ScenarioRunResult:
+    def run(
+        self,
+        scenario,
+        visualize: bool,
+        record: bool,
+        *,
+        lidar_view: bool = False,
+    ) -> ScenarioRunResult:
         backend, sensors = self._build_runtime_components()
         max_ticks = self.runtime_config.max_ticks
         if max_ticks <= 0:
@@ -113,7 +121,9 @@ class ScenarioRunner:
             latency_budget_ms=self.runtime_config.latency_budget_ms,
         )
         replay_writer = Hdf5OrJsonReplayWriter(self.output_dir) if record else None
-        if visualize:
+        if lidar_view:
+            visualization = PygameLidarVisualizationService(output_dir=self.output_dir)
+        elif visualize:
             bridge = WebSocketBridge()
             start_server_thread(
                 bridge,

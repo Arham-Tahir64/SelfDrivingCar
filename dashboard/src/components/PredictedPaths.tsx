@@ -4,6 +4,7 @@ import * as THREE from "three";
 import { useFrameStore } from "../store/frameStore";
 import { classColor, COLORS } from "../utils/colors";
 import { disposeObject3D } from "../utils/dispose";
+import { worldToScene } from "../utils/scene";
 
 export default function PredictedPaths() {
   const groupRef = useRef<THREE.Group>(null);
@@ -25,7 +26,10 @@ export default function PredictedPaths() {
       if (!pred.predicted_trajectory || pred.predicted_trajectory.length < 2) continue;
 
       const points = pred.predicted_trajectory.map(
-        (p) => new THREE.Vector3(p.x, 0.1, -p.y),
+        (p) => {
+          const scene = worldToScene([p.x, p.y, 0]);
+          return new THREE.Vector3(scene.x, 0.1, scene.z);
+        },
       );
       const geom = new THREE.BufferGeometry().setFromPoints(points);
       const color = classColor(pred.object_class);

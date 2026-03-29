@@ -2,6 +2,7 @@ import { useRef } from "react";
 import { useFrame } from "@react-three/fiber";
 import * as THREE from "three";
 import { useFrameStore } from "../store/frameStore";
+import { frameInterpolationAlpha, interpolateEgoPose } from "../utils/interpolation";
 import { dampAngle, worldToScene, yawToScene } from "../utils/scene";
 
 const BODY_COLOR = new THREE.Color("#f5f7fa");
@@ -80,8 +81,17 @@ export default function EgoVehicle() {
   const initialized = useRef(false);
 
   useFrame(() => {
-    const frame = useFrameStore.getState().currentFrame;
-    const ego = frame?.["localization/ego_pose"];
+    const state = useFrameStore.getState();
+    const alpha = frameInterpolationAlpha(
+      state.currentFrameReceivedAtMs,
+      state.frameIntervalMs,
+      performance.now(),
+    );
+    const ego = interpolateEgoPose(
+      state.previousFrame?.["localization/ego_pose"],
+      state.currentFrame?.["localization/ego_pose"],
+      alpha,
+    );
     if (!ego || !groupRef.current) return;
 
     targetPosition.current.copy(worldToScene(ego.world_xyz));

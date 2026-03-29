@@ -1,7 +1,8 @@
 import numpy as np
 
 from autonomy_demo.interfaces.enums import BehaviorState, TrackState
-from autonomy_demo.interfaces.types import CameraFrame, ObjectDetection
+from autonomy_demo.interfaces.types import CameraFrame, ObjectDetection, PerceptionStatus
+from autonomy_demo.common.serialization import serialize
 from autonomy_demo.orchestration.event_bus import InProcessEventBus
 
 
@@ -34,3 +35,28 @@ def test_event_bus_publish_subscribe() -> None:
 def test_behavior_state_enum_contains_prd_states() -> None:
     assert BehaviorState.CONSTRUCTION_NAVIGATE.value == "CONSTRUCTION_NAVIGATE"
 
+
+def test_serialization_preserves_perception_provenance_fields() -> None:
+    detection = ObjectDetection(
+        track_id=2,
+        object_class="vehicle",
+        world_bbox_3d=np.zeros((8, 3), dtype=np.float32),
+        velocity=np.zeros(3, dtype=np.float32),
+        confidence=0.7,
+        track_state=TrackState.TENTATIVE,
+        source_modality="fused",
+        source_sensor_ids=["front_camera", "lidar"],
+        position_estimate_kind="fusion",
+    )
+    status = PerceptionStatus(
+        active_mode="fused_v1",
+        fallback_state="fused",
+        counts_by_modality={"fused": 1},
+        active_camera_sensors=["front_camera"],
+        detection_count=1,
+    )
+    payload = serialize({"perception/detections": [detection], "perception/status": status})
+    assert payload["perception/detections"][0]["source_modality"] == "fused"
+    assert payload["perception/detections"][0]["source_sensor_ids"] == ["front_camera", "lidar"]
+    assert payload["perception/detections"][0]["position_estimate_kind"] == "fusion"
+    assert payload["perception/status"]["fallback_state"] == "fused"

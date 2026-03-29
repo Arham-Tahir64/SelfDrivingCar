@@ -20,10 +20,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sensor-config", default="configs/sensors.default.yaml")
     parser.add_argument("--backend", choices=["stub", "carla"], default=None)
     parser.add_argument("--max-ticks", type=int, default=None)
-    parser.add_argument("--perception-mode", choices=["stub", "camera_v1", "lidar_v1"], default=None)
+    parser.add_argument("--perception-mode", choices=["stub", "camera_v1", "lidar_v1", "fused_v1"], default=None)
     parser.add_argument("--perception-device", default=None)
     parser.add_argument("--perception-model-variant", default=None)
     parser.add_argument("--visualize", action="store_true")
+    parser.add_argument("--lidar-view", action="store_true")
     parser.add_argument("--record", action="store_true")
     parser.add_argument("--validate", action="store_true")
     parser.add_argument("--headless", action="store_true")
@@ -43,7 +44,7 @@ def main() -> int:
         runtime_config.perception_device = args.perception_device
     if args.perception_model_variant:
         runtime_config.perception_model_variant = args.perception_model_variant
-    if args.visualize:
+    if args.visualize or args.lidar_view:
         runtime_config.enable_visualization = True
     if args.record:
         runtime_config.record_replay = True
@@ -58,6 +59,7 @@ def main() -> int:
         scenario=scenario,
         visualize=runtime_config.enable_visualization and not args.headless,
         record=runtime_config.record_replay,
+        lidar_view=args.lidar_view and not args.headless,
     )
     return 0
 

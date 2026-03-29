@@ -2,15 +2,18 @@ import { useRef } from "react";
 import { useFrame } from "@react-three/fiber";
 import * as THREE from "three";
 import { useFrameStore } from "../store/frameStore";
-import { classColor, classOpacity } from "../utils/colors";
+import { classColor, classOpacity, modalityColor } from "../utils/colors";
 import { disposeObject3D } from "../utils/dispose";
+import { worldToScene } from "../utils/scene";
 
 const AGENT_HEIGHT = 1.6;
 const DEFAULT_SIZE = new THREE.Vector3(4.5, AGENT_HEIGHT, 2.0);
 
 function bboxCentroid(bbox: number[][]): THREE.Vector3 {
   if (!bbox || bbox.length === 0) return new THREE.Vector3();
-  let sx = 0, sy = 0, sz = 0;
+  let sx = 0;
+  let sy = 0;
+  let sz = 0;
   for (const corner of bbox) {
     sx += corner[0] ?? 0;
     sy += corner[1] ?? 0;
@@ -22,13 +25,19 @@ function bboxCentroid(bbox: number[][]): THREE.Vector3 {
 
 function bboxSize(bbox: number[][]): THREE.Vector3 {
   if (!bbox || bbox.length < 2) return DEFAULT_SIZE.clone();
-  let minX = Infinity, maxX = -Infinity;
-  let minY = Infinity, maxY = -Infinity;
-  let minZ = Infinity, maxZ = -Infinity;
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let minY = Infinity;
+  let maxY = -Infinity;
+  let minZ = Infinity;
+  let maxZ = -Infinity;
   for (const c of bbox) {
-    minX = Math.min(minX, c[0] ?? 0); maxX = Math.max(maxX, c[0] ?? 0);
-    minY = Math.min(minY, c[1] ?? 0); maxY = Math.max(maxY, c[1] ?? 0);
-    minZ = Math.min(minZ, c[2] ?? 0); maxZ = Math.max(maxZ, c[2] ?? 0);
+    minX = Math.min(minX, c[0] ?? 0);
+    maxX = Math.max(maxX, c[0] ?? 0);
+    minY = Math.min(minY, c[1] ?? 0);
+    maxY = Math.max(maxY, c[1] ?? 0);
+    minZ = Math.min(minZ, c[2] ?? 0);
+    maxZ = Math.max(maxZ, c[2] ?? 0);
   }
   const dx = Math.max(maxX - minX, 0.5);
   const dy = Math.max(maxY - minY, 0.5);
@@ -49,7 +58,7 @@ export default function DetectedAgents() {
 
     disposeObject3D(group);
 
-    const detections = frame?.["perception/detections"];
+    const detections = frame["perception/detections"];
     if (!detections) return;
 
     for (const det of detections) {
@@ -59,6 +68,8 @@ export default function DetectedAgents() {
       const size = bboxSize(det.world_bbox_3d);
       const color = classColor(det.object_class);
       const opacity = classOpacity(det.object_class);
+      const outlineColor = modalityColor(det.source_modality);
+      const sceneCenter = worldToScene([centroid.x, centroid.y, centroid.z]);
 
       const geom = new THREE.BoxGeometry(size.x, size.y, size.z);
       const mat = new THREE.MeshStandardMaterial({
@@ -66,17 +77,17 @@ export default function DetectedAgents() {
         transparent: true,
         opacity,
         depthWrite: false,
+        emissive: outlineColor,
+        emissiveIntensity: det.source_modality === "fused" ? 0.18 : 0.08,
       });
       const mesh = new THREE.Mesh(geom, mat);
-      // CARLA coords → Three.js
-      mesh.position.set(centroid.x, size.y / 2, -centroid.y);
+      mesh.position.set(sceneCenter.x, size.y / 2, sceneCenter.z);
 
-      // White outline
       const edgesGeom = new THREE.EdgesGeometry(geom);
       const edgesMat = new THREE.LineBasicMaterial({
-        color: "white",
+        color: outlineColor,
         transparent: true,
-        opacity: 0.6,
+        opacity: 0.95,
       });
       const edges = new THREE.LineSegments(edgesGeom, edgesMat);
       mesh.add(edges);

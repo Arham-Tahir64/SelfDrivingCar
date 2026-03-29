@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import { useFrame, useThree } from "@react-three/fiber";
 import * as THREE from "three";
 import { useFrameStore } from "../store/frameStore";
+import { frameInterpolationAlpha, interpolateEgoPose } from "../utils/interpolation";
 import { worldToScene, yawToScene } from "../utils/scene";
 import EgoVehicle from "./EgoVehicle";
 import LaneLines from "./LaneLines";
@@ -9,6 +10,7 @@ import DetectedAgents from "./DetectedAgents";
 import PlannedTrajectory from "./PlannedTrajectory";
 import PredictedPaths from "./PredictedPaths";
 import Cones from "./Cones";
+import TrafficLights from "./TrafficLights";
 
 const CAMERA_OFFSET_LOCAL = new THREE.Vector3(-18, 20, 0);
 const LOOK_AHEAD_LOCAL = new THREE.Vector3(22, 0, 0);
@@ -32,8 +34,17 @@ function CameraController() {
   }, [camera]);
 
   useFrame(() => {
-    const frame = useFrameStore.getState().currentFrame;
-    const ego = frame?.["localization/ego_pose"];
+    const state = useFrameStore.getState();
+    const alpha = frameInterpolationAlpha(
+      state.currentFrameReceivedAtMs,
+      state.frameIntervalMs,
+      performance.now(),
+    );
+    const ego = interpolateEgoPose(
+      state.previousFrame?.["localization/ego_pose"],
+      state.currentFrame?.["localization/ego_pose"],
+      alpha,
+    );
 
     if (ego) {
       const egoPosition = worldToScene(ego.world_xyz);
@@ -92,6 +103,7 @@ export default function BEVScene() {
       <EgoVehicle />
       <LaneLines />
       <DetectedAgents />
+      <TrafficLights />
       <PlannedTrajectory />
       <PredictedPaths />
       <Cones />

@@ -23,7 +23,7 @@ visualization:
 perception:
   mode: camera_v1
   device: cpu
-  model_variant: bootstrap
+  model_variant: auto
 evaluation:
   latency_budget_ms:
     perception: 60

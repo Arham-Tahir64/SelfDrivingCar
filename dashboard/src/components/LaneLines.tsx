@@ -4,8 +4,14 @@ import * as THREE from "three";
 import { useFrameStore } from "../store/frameStore";
 import { COLORS } from "../utils/colors";
 import { disposeObject3D } from "../utils/dispose";
+import { worldToScene } from "../utils/scene";
 
 const MAX_LANES = 30;
+
+function scenePoint(point: number[], y: number): THREE.Vector3 {
+  const scene = worldToScene(point);
+  return new THREE.Vector3(scene.x, y, scene.z);
+}
 
 export default function LaneLines() {
   const groupRef = useRef<THREE.Group>(null);
@@ -20,15 +26,12 @@ export default function LaneLines() {
 
     disposeObject3D(group);
 
-    // Draw perception lanes
-    const lanes = frame?.["perception/lanes"];
+    const lanes = frame["perception/lanes"];
     if (lanes) {
       for (let i = 0; i < Math.min(lanes.length, MAX_LANES); i++) {
         const lane = lanes[i];
         if (!lane.polyline_world || lane.polyline_world.length < 2) continue;
-        const points = lane.polyline_world.map(
-          (p: number[]) => new THREE.Vector3(p[0], 0.05, -p[1]),
-        );
+        const points = lane.polyline_world.map((p: number[]) => scenePoint(p, 0.05));
         const geom = new THREE.BufferGeometry().setFromPoints(points);
         const mat = new THREE.LineBasicMaterial({
           color: COLORS.laneLine,
@@ -39,18 +42,14 @@ export default function LaneLines() {
       }
     }
 
-    // Draw static lanes from local map
-    const localMap = frame?.["map/local_map"];
+    const localMap = frame["map/local_map"];
     if (localMap?.static_lanes) {
       for (let i = 0; i < Math.min(localMap.static_lanes.length, MAX_LANES); i++) {
         const sl = localMap.static_lanes[i];
         const isClosed = localMap.closed_lanes?.includes(sl.lane_id);
 
-        // Centerline
         if (sl.centerline_world && sl.centerline_world.length >= 2) {
-          const pts = sl.centerline_world.map(
-            (p: number[]) => new THREE.Vector3(p[0], 0.04, -(p[1] ?? p[2] ?? 0)),
-          );
+          const pts = sl.centerline_world.map((p: number[]) => scenePoint(p, 0.04));
           const geom = new THREE.BufferGeometry().setFromPoints(pts);
           const mat = new THREE.LineDashedMaterial({
             color: isClosed ? COLORS.closedLane : COLORS.laneLine,
@@ -64,11 +63,8 @@ export default function LaneLines() {
           group.add(line);
         }
 
-        // Left boundary
         if (sl.left_boundary_world && sl.left_boundary_world.length >= 2) {
-          const pts = sl.left_boundary_world.map(
-            (p: number[]) => new THREE.Vector3(p[0], 0.04, -(p[1] ?? 0)),
-          );
+          const pts = sl.left_boundary_world.map((p: number[]) => scenePoint(p, 0.04));
           const geom = new THREE.BufferGeometry().setFromPoints(pts);
           const mat = new THREE.LineBasicMaterial({
             color: isClosed ? COLORS.closedLane : COLORS.laneLine,
@@ -78,11 +74,8 @@ export default function LaneLines() {
           group.add(new THREE.Line(geom, mat));
         }
 
-        // Right boundary
         if (sl.right_boundary_world && sl.right_boundary_world.length >= 2) {
-          const pts = sl.right_boundary_world.map(
-            (p: number[]) => new THREE.Vector3(p[0], 0.04, -(p[1] ?? 0)),
-          );
+          const pts = sl.right_boundary_world.map((p: number[]) => scenePoint(p, 0.04));
           const geom = new THREE.BufferGeometry().setFromPoints(pts);
           const mat = new THREE.LineBasicMaterial({
             color: isClosed ? COLORS.closedLane : COLORS.laneLine,
@@ -94,13 +87,10 @@ export default function LaneLines() {
       }
     }
 
-    // Draw temporary boundaries
     if (localMap?.temporary_boundaries) {
       for (const boundary of localMap.temporary_boundaries) {
         if (!boundary?.polyline_world || boundary.polyline_world.length < 2) continue;
-        const pts = boundary.polyline_world.map(
-          (p: number[]) => new THREE.Vector3(p[0], 0.06, -(p[1] ?? 0)),
-        );
+        const pts = boundary.polyline_world.map((p: number[]) => scenePoint(p, 0.06));
         const geom = new THREE.BufferGeometry().setFromPoints(pts);
         const mat = new THREE.LineDashedMaterial({
           color: COLORS.temporaryBoundary,

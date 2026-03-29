@@ -2,10 +2,10 @@ import { useRef } from "react";
 import { useFrame } from "@react-three/fiber";
 import * as THREE from "three";
 import { useFrameStore } from "../store/frameStore";
-import { COLORS } from "../utils/colors";
+import { modalityColor } from "../utils/colors";
 import { disposeObject3D } from "../utils/dispose";
+import { worldToScene } from "../utils/scene";
 
-const CONE_COLOR = new THREE.Color(COLORS.cone);
 const CONE_RADIUS = 0.3;
 const CONE_HEIGHT = 0.7;
 
@@ -22,22 +22,20 @@ export default function Cones() {
 
     disposeObject3D(group);
 
-    const cones = frame?.["perception/cones"];
-    const mapCones = frame?.["map/local_map"]?.cone_instances;
-    const allCones = [...(cones ?? []), ...(mapCones ?? [])];
+    const allCones = frame?.["perception/cones"] ?? [];
 
     // Deduplicate by proximity
     const seen: THREE.Vector3[] = [];
     for (const cone of allCones) {
       if (!cone.world_xyz) continue;
-      const pos = new THREE.Vector3(cone.world_xyz[0], 0, -(cone.world_xyz[1] ?? 0));
+      const pos = worldToScene(cone.world_xyz);
       const duplicate = seen.some((s) => s.distanceTo(pos) < 1.0);
       if (duplicate) continue;
       seen.push(pos);
 
       const geom = new THREE.ConeGeometry(CONE_RADIUS, CONE_HEIGHT, 8);
       const mat = new THREE.MeshStandardMaterial({
-        color: CONE_COLOR,
+        color: modalityColor(cone.source_modality ?? "lidar"),
         transparent: true,
         opacity: 0.85,
       });

@@ -27,10 +27,36 @@ def _object_class_from_label(label: str) -> ObjectClass | None:
     return _YOLO_CLASS_MAP.get(label.strip().lower())
 
 
+def _sensor_mount(sensor_id: str) -> tuple[np.ndarray, float]:
+    mounts = {
+        "front_camera": (np.array([2.3, 0.0, 0.8], dtype=np.float32), 0.0),
+        "rear_camera": (np.array([-2.0, 0.0, 1.0], dtype=np.float32), np.pi),
+        "left_camera": (np.array([0.0, -0.8, 1.0], dtype=np.float32), -np.pi * 0.5),
+        "right_camera": (np.array([0.0, 0.8, 1.0], dtype=np.float32), np.pi * 0.5),
+    }
+    return mounts.get(sensor_id, (np.zeros(3, dtype=np.float32), 0.0))
+
+
+def _rotate_xy(vector_xyz: np.ndarray, yaw_rad: float) -> np.ndarray:
+    rotation = np.array(
+        [
+            [np.cos(yaw_rad), -np.sin(yaw_rad), 0.0],
+            [np.sin(yaw_rad), np.cos(yaw_rad), 0.0],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=np.float32,
+    )
+    return (rotation @ np.asarray(vector_xyz, dtype=np.float32)).astype(np.float32)
+
+
 def _pseudo_world_box(
     bbox_xyxy: np.ndarray,
     object_class: ObjectClass,
     image_shape: tuple[int, int, int],
+    *,
+    sensor_id: str,
+    ego_world_xyz: np.ndarray,
+    ego_yaw_rad: float,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     image_height, image_width = image_shape[:2]
     bbox_width = max(float(bbox_xyxy[2] - bbox_xyxy[0]), 1.0)
@@ -46,31 +72,43 @@ def _pseudo_world_box(
         ObjectClass.TRAFFIC_LIGHT: (0.6, 0.6, 3.0),
     }
     length_m, width_m, height_m = size_map.get(object_class, (2.0, 1.0, 1.5))
-    center = np.array(
+    center_sensor = np.array(
         [forward_distance, lateral_offset, height_m * 0.5],
         dtype=np.float32,
     )
     dx = length_m * 0.5
     dy = width_m * 0.5
     dz = height_m * 0.5
-    world_bbox = np.array(
+    sensor_bbox = np.array(
         [
-            [center[0] - dx, center[1] - dy, center[2] - dz],
-            [center[0] + dx, center[1] - dy, center[2] - dz],
-            [center[0] + dx, center[1] + dy, center[2] - dz],
-            [center[0] - dx, center[1] + dy, center[2] - dz],
-            [center[0] - dx, center[1] - dy, center[2] + dz],
-            [center[0] + dx, center[1] - dy, center[2] + dz],
-            [center[0] + dx, center[1] + dy, center[2] + dz],
-            [center[0] - dx, center[1] + dy, center[2] + dz],
+            [center_sensor[0] - dx, center_sensor[1] - dy, center_sensor[2] - dz],
+            [center_sensor[0] + dx, center_sensor[1] - dy, center_sensor[2] - dz],
+            [center_sensor[0] + dx, center_sensor[1] + dy, center_sensor[2] - dz],
+            [center_sensor[0] - dx, center_sensor[1] + dy, center_sensor[2] - dz],
+            [center_sensor[0] - dx, center_sensor[1] - dy, center_sensor[2] + dz],
+            [center_sensor[0] + dx, center_sensor[1] - dy, center_sensor[2] + dz],
+            [center_sensor[0] + dx, center_sensor[1] + dy, center_sensor[2] + dz],
+            [center_sensor[0] - dx, center_sensor[1] + dy, center_sensor[2] + dz],
         ],
         dtype=np.float32,
     )
-    velocity = np.array(
+    sensor_velocity = np.array(
         [max(0.0, min(20.0, bbox_width / max(image_width, 1) * 20.0)), 0.0, 0.0],
         dtype=np.float32,
     )
-    return world_bbox, velocity, center
+    sensor_offset, sensor_yaw_rad = _sensor_mount(sensor_id)
+    center_vehicle = _rotate_xy(center_sensor, sensor_yaw_rad) + sensor_offset
+    world_center = _rotate_xy(center_vehicle, ego_yaw_rad) + np.asarray(ego_world_xyz, dtype=np.float32)
+    world_bbox = np.asarray(
+        [
+            _rotate_xy(_rotate_xy(corner, sensor_yaw_rad) + sensor_offset, ego_yaw_rad)
+            + np.asarray(ego_world_xyz, dtype=np.float32)
+            for corner in sensor_bbox
+        ],
+        dtype=np.float32,
+    )
+    world_velocity = _rotate_xy(_rotate_xy(sensor_velocity, sensor_yaw_rad), ego_yaw_rad)
+    return world_bbox, world_velocity, world_center.astype(np.float32)
 
 
 @dataclass(slots=True)
@@ -100,19 +138,19 @@ class YoloObjectDetector:
         bootstrap_annotations: list[BootstrapAnnotation],
         *,
         sensor_id: str = "front_camera",
-    ) -> list[FrameDetection2D]:
-        if self.model_variant.strip().lower() in {"", "bootstrap", "none"}:
-            return self._from_bootstrap(bootstrap_annotations, sensor_id=sensor_id)
+        ego_world_xyz: np.ndarray | None = None,
+        ego_yaw_rad: float = 0.0,
+    ) -> tuple[list[FrameDetection2D], str]:
+        if self._uses_explicit_bootstrap():
+            return self._from_bootstrap(bootstrap_annotations, sensor_id=sensor_id), "bootstrap"
         if self._model is None and self._load_error is None:
             try:
-                from ultralytics import YOLO  # type: ignore
-
-                self._model = YOLO(self.model_variant)
+                self._model = self._load_model()
             except Exception as exc:  # pragma: no cover - depends on optional runtime deps
                 self._load_error = str(exc)
-                return self._from_bootstrap(bootstrap_annotations, sensor_id=sensor_id)
+                return self._from_bootstrap(bootstrap_annotations, sensor_id=sensor_id), "bootstrap"
         if self._model is None:
-            return self._from_bootstrap(bootstrap_annotations, sensor_id=sensor_id)
+            return self._from_bootstrap(bootstrap_annotations, sensor_id=sensor_id), "bootstrap"
         try:
             results = self._model.predict(
                 source=frame.astype(np.uint8),
@@ -120,15 +158,19 @@ class YoloObjectDetector:
                 verbose=False,
             )
         except Exception:  # pragma: no cover - depends on optional runtime deps
-            return self._from_bootstrap(bootstrap_annotations, sensor_id=sensor_id)
+            return self._from_bootstrap(bootstrap_annotations, sensor_id=sensor_id), "bootstrap"
         if not results:
-            return self._from_bootstrap(bootstrap_annotations, sensor_id=sensor_id)
+            return [], "camera"
         result = results[0]
         boxes = getattr(result, "boxes", None)
         names = getattr(result, "names", {})
         detections: list[FrameDetection2D] = []
         if boxes is None:
-            return self._from_bootstrap(bootstrap_annotations, sensor_id=sensor_id)
+            return [], "camera"
+        ego_xyz = np.asarray(
+            np.zeros(3, dtype=np.float32) if ego_world_xyz is None else ego_world_xyz,
+            dtype=np.float32,
+        )
         for box in boxes:
             cls_idx = int(box.cls[0].item())
             label = str(names.get(cls_idx, cls_idx))
@@ -137,35 +179,51 @@ class YoloObjectDetector:
                 continue
             bbox_xyxy = box.xyxy[0].detach().cpu().numpy().astype(np.float32)
             confidence = float(box.conf[0].item())
-            matched = self._match_bootstrap(bbox_xyxy, object_class, bootstrap_annotations)
-            if matched is not None:
-                detections.append(
-                    FrameDetection2D(
-                        bbox_xyxy=bbox_xyxy,
-                        object_class=object_class,
-                        confidence=confidence,
-                        source_sensor_id=sensor_id,
-                        world_bbox_3d=matched.world_bbox_3d,
-                        velocity_xyz=matched.velocity_xyz,
-                        world_xyz=matched.world_xyz,
-                        preferred_track_id=matched.track_id,
-                        traffic_light_state=matched.traffic_light_state,
-                    )
-                )
-                continue
-            world_bbox, velocity_xyz, world_xyz = _pseudo_world_box(bbox_xyxy, object_class, frame.shape)
+            world_bbox, velocity_xyz, world_xyz = _pseudo_world_box(
+                bbox_xyxy,
+                object_class,
+                frame.shape,
+                sensor_id=sensor_id,
+                ego_world_xyz=ego_xyz,
+                ego_yaw_rad=ego_yaw_rad,
+            )
             detections.append(
                 FrameDetection2D(
                     bbox_xyxy=bbox_xyxy,
                     object_class=object_class,
                     confidence=confidence,
                     source_sensor_id=sensor_id,
+                    source_modality="camera",
+                    source_sensor_ids=[sensor_id],
+                    position_estimate_kind="camera_projection",
                     world_bbox_3d=world_bbox,
                     velocity_xyz=velocity_xyz,
                     world_xyz=world_xyz,
                 )
             )
-        return detections
+        return detections, "camera"
+
+    def _uses_explicit_bootstrap(self) -> bool:
+        return self.model_variant.strip().lower() == "bootstrap"
+
+    def _candidate_variants(self) -> list[str]:
+        variant = self.model_variant.strip()
+        if variant.lower() in {"", "default", "auto", "none"}:
+            return ["yolo11n.pt", "yolov8n.pt"]
+        return [variant]
+
+    def _load_model(self):
+        from ultralytics import YOLO  # type: ignore
+
+        last_error: Exception | None = None
+        for candidate in self._candidate_variants():
+            try:
+                return YOLO(candidate)
+            except Exception as exc:  # pragma: no cover - depends on optional runtime deps
+                last_error = exc
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("no YOLO model candidates were available")
 
     def _from_bootstrap(
         self,
@@ -179,6 +237,9 @@ class YoloObjectDetector:
                 object_class=annotation.object_class,
                 confidence=float(annotation.confidence),
                 source_sensor_id=sensor_id,
+                source_modality="bootstrap",
+                source_sensor_ids=[sensor_id],
+                position_estimate_kind="truth_fallback",
                 world_bbox_3d=np.asarray(annotation.world_bbox_3d, dtype=np.float32),
                 velocity_xyz=np.asarray(annotation.velocity_xyz, dtype=np.float32),
                 world_xyz=np.asarray(annotation.world_xyz, dtype=np.float32),
@@ -187,37 +248,6 @@ class YoloObjectDetector:
             )
             for annotation in annotations
         ]
-
-    def _match_bootstrap(
-        self,
-        bbox_xyxy: np.ndarray,
-        object_class: ObjectClass,
-        annotations: list[BootstrapAnnotation],
-    ) -> BootstrapAnnotation | None:
-        if not annotations:
-            return None
-        bbox_center = np.array(
-            [(bbox_xyxy[0] + bbox_xyxy[2]) * 0.5, (bbox_xyxy[1] + bbox_xyxy[3]) * 0.5],
-            dtype=np.float32,
-        )
-        same_class = [annotation for annotation in annotations if annotation.object_class == object_class]
-        if not same_class:
-            return None
-        return min(
-            same_class,
-            key=lambda annotation: float(
-                np.linalg.norm(
-                    bbox_center
-                    - np.array(
-                        [
-                            (annotation.image_bbox_xyxy[0] + annotation.image_bbox_xyxy[2]) * 0.5,
-                            (annotation.image_bbox_xyxy[1] + annotation.image_bbox_xyxy[3]) * 0.5,
-                        ],
-                        dtype=np.float32,
-                    )
-                )
-            ),
-        )
 
 
 def bootstrap_annotations_from_metadata(

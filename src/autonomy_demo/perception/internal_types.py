@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 from numpy.typing import NDArray
@@ -17,6 +17,9 @@ class FrameDetection2D:
     object_class: ObjectClass
     confidence: float
     source_sensor_id: str = "front_camera"
+    source_modality: str = "camera"
+    source_sensor_ids: list[str] = field(default_factory=list)
+    position_estimate_kind: str = "camera_projection"
     world_bbox_3d: FloatArray | None = None
     velocity_xyz: FloatArray | None = None
     world_xyz: FloatArray | None = None
@@ -37,6 +40,9 @@ class LidarClusterDetection:
     object_class: ObjectClass
     confidence: float
     point_count: int
+    source_modality: str = "lidar"
+    source_sensor_ids: list[str] = field(default_factory=lambda: ["lidar"])
+    position_estimate_kind: str = "lidar_cluster"
 
 
 @dataclass(slots=True)

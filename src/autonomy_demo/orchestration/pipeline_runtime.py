@@ -90,6 +90,11 @@ class PipelineRuntime:
                 self.context.event_bus.publish(TopicName.PERCEPTION_DRIVABLE_SPACE.value, drivable_space)
                 self.context.event_bus.publish(TopicName.PERCEPTION_TRAFFIC_LIGHTS.value, traffic_lights)
                 self.context.event_bus.publish(TopicName.PERCEPTION_CONES.value, cones)
+                if "perception_summary" in bundle.metadata:
+                    self.context.event_bus.publish(
+                        TopicName.PERCEPTION_STATUS.value,
+                        bundle.metadata["perception_summary"],
+                    )
                 self.context.event_bus.publish(TopicName.LOCALIZATION_EGO_POSE.value, ego_pose)
                 self.context.event_bus.publish(TopicName.MAP_LOCAL_MAP.value, local_map)
                 self.context.event_bus.publish(TopicName.PREDICTION_AGENTS.value, predictions)

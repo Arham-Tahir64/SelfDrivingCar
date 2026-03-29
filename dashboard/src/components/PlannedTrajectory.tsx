@@ -4,6 +4,7 @@ import * as THREE from "three";
 import { useFrameStore } from "../store/frameStore";
 import { COLORS } from "../utils/colors";
 import { disposeObject3D } from "../utils/dispose";
+import { worldToScene } from "../utils/scene";
 
 const TRAJ_COLOR = new THREE.Color(COLORS.trajectory);
 
@@ -24,7 +25,10 @@ export default function PlannedTrajectory() {
     if (!traj?.waypoints || traj.waypoints.length < 2) return;
 
     const points = traj.waypoints.map(
-      (wp) => new THREE.Vector3(wp.x, 0.15, -wp.y),
+      (wp) => {
+        const scene = worldToScene([wp.x, wp.y, 0]);
+        return new THREE.Vector3(scene.x, 0.15, scene.z);
+      },
     );
     const geom = new THREE.BufferGeometry().setFromPoints(points);
     const mat = new THREE.LineBasicMaterial({

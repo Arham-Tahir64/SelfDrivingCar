@@ -13,6 +13,13 @@ export interface ObjectDetection {
   velocity: number[];
   confidence: number;
   track_state: string;
+  source_modality: "camera" | "lidar" | "fused" | "bootstrap";
+  source_sensor_ids: string[];
+  position_estimate_kind:
+    | "camera_projection"
+    | "lidar_cluster"
+    | "fusion"
+    | "truth_fallback";
 }
 
 export interface LaneLine {
@@ -26,11 +33,19 @@ export interface TrafficLightDetection {
   state: string;
   world_xyz: number[];
   confidence: number;
+  source_modality: "camera" | "lidar" | "fused" | "bootstrap";
+  source_sensor_ids: string[];
+  position_estimate_kind:
+    | "camera_projection"
+    | "lidar_cluster"
+    | "fusion"
+    | "truth_fallback";
 }
 
 export interface ConeDetection {
   world_xyz: number[];
   confidence: number;
+  source_modality: "camera" | "lidar" | "fused" | "bootstrap";
 }
 
 export interface AgentPrediction {
@@ -89,6 +104,16 @@ export interface ScenarioInfo {
   max_duration_s: number;
 }
 
+export interface PerceptionStatus {
+  active_mode: string;
+  fallback_state: string;
+  counts_by_modality: Record<string, number>;
+  active_camera_sensors: string[];
+  detection_count: number;
+  cone_count: number;
+  traffic_light_count: number;
+}
+
 export interface PipelineFrame {
   tick_id: number;
   sim_time_s: number;
@@ -101,5 +126,6 @@ export interface PipelineFrame {
   "prediction/agents"?: AgentPrediction[];
   "planning/ego_trajectory"?: EgoTrajectory;
   "control/vehicle_command"?: ControlCommand;
+  "perception/status"?: PerceptionStatus;
   "system/scenario_info"?: ScenarioInfo;
 }

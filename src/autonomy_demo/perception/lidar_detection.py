@@ -164,7 +164,11 @@ class LidarObstacleDetector:
         footprint_m = max(float(size_xyz[0]), float(size_xyz[1]))
         height_m = float(size_xyz[2])
         if footprint_m <= 0.9 and 0.2 <= height_m <= 1.2 and point_count <= 12:
-            return ConeDetection(world_xyz=centroid_xyz.astype(np.float32), confidence=0.8)
+            return ConeDetection(
+                world_xyz=centroid_xyz.astype(np.float32),
+                confidence=0.8,
+                source_modality="lidar",
+            )
         return None
 
     def _cluster_confidence(self, point_count: int, size_xyz: np.ndarray) -> float:
