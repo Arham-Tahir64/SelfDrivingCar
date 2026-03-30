@@ -117,7 +117,8 @@ class RouteFollowerController:
         if risk is None:
             return command
         gap_m, ttc_s = risk
-        if gap_m <= self.emergency_gap_m or ttc_s <= self.emergency_ttc_s:
+        # Hard emergency brake: very close or imminent collision
+        if gap_m <= self.emergency_gap_m * 0.5 or ttc_s <= self.emergency_ttc_s * 0.5:
             return ControlCommand(
                 throttle=0.0,
                 steer=command.steer,
@@ -125,6 +126,31 @@ class RouteFollowerController:
                 hand_brake=command.hand_brake,
                 reverse=command.reverse,
                 emergency_override=True,
+            )
+        # Graduated braking: within caution zone, scale brake by proximity
+        if gap_m <= self.emergency_gap_m or ttc_s <= self.emergency_ttc_s:
+            gap_ratio = clamp(gap_m / self.emergency_gap_m, 0.0, 1.0)
+            ttc_ratio = clamp(ttc_s / self.emergency_ttc_s, 0.0, 1.0)
+            urgency = 1.0 - min(gap_ratio, ttc_ratio)
+            brake_amount = 0.3 + 0.5 * urgency
+            return ControlCommand(
+                throttle=0.0,
+                steer=command.steer,
+                brake=max(command.brake, brake_amount),
+                hand_brake=command.hand_brake,
+                reverse=command.reverse,
+                emergency_override=urgency > 0.7,
+            )
+        # Comfort zone: lead vehicle ahead but not critical — allow gentle following
+        if gap_m <= self.emergency_gap_m * 2.0:
+            throttle_scale = clamp((gap_m - self.emergency_gap_m) / self.emergency_gap_m, 0.0, 1.0)
+            return ControlCommand(
+                throttle=command.throttle * throttle_scale,
+                steer=command.steer,
+                brake=max(command.brake, 0.1 * (1.0 - throttle_scale)),
+                hand_brake=command.hand_brake,
+                reverse=command.reverse,
+                emergency_override=False,
             )
         return command
 
@@ -248,7 +274,18 @@ class RouteFollowerController:
             estimated_gap_m = float(np.clip((650.0 / bbox_height) - 1.5, 2.0, 24.0))
             if bbox_height >= 18.0 and bbox_width >= 18.0 and bbox_bottom >= 120.0:
                 estimated_gap_m = min(estimated_gap_m, 9.0)
-            closing_speed = max(float(ego_pose.speed_mps), 0.1)
+            # Use velocity from detection if available, otherwise assume lead is
+            # stationary only when bbox is large (close).  For distant bboxes,
+            # assume the lead vehicle moves at a similar speed to avoid
+            # over-braking on vehicles that are simply cruising ahead.
+            lead_speed = 0.0
+            velocity_vec = getattr(detection, "velocity", None)
+            if velocity_vec is not None:
+                lead_speed = float(np.linalg.norm(np.asarray(velocity_vec, dtype=np.float32)[:2]))
+            elif bbox_height < 60.0:
+                # Distant vehicle — assume it moves at ~70% of ego speed
+                lead_speed = ego_pose.speed_mps * 0.7
+            closing_speed = max(float(ego_pose.speed_mps) - lead_speed, 0.1)
             ttc_s = estimated_gap_m / closing_speed
             if best is None or estimated_gap_m < best[0]:
                 best = (estimated_gap_m, ttc_s)

@@ -132,6 +132,7 @@ class ScenarioRunner:
                 port=self.runtime_config.ws_port,
             )
             visualization_sinks.append(bridge)
+            visualization_sinks.append(NullVisualizationService(enabled=True, output_dir=self.output_dir))
             visualization_sinks.append(PygameCameraGridVisualizationService(output_dir=self.output_dir))
         if lidar_view:
             visualization_sinks.append(PygameLidarVisualizationService(output_dir=self.output_dir))

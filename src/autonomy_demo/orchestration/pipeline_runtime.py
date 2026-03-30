@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 
+from autonomy_demo.eval.metrics import LatencyAccumulator
 from autonomy_demo.interfaces.contracts import (
     BehaviorPlanner,
     Controller,
@@ -17,6 +19,10 @@ from autonomy_demo.interfaces.contracts import (
 )
 from autonomy_demo.interfaces.enums import TopicName
 from autonomy_demo.interfaces.types import ReplayFrame, ScenarioConfig
+
+
+def _time_ms() -> float:
+    return time.perf_counter() * 1000.0
 
 
 @dataclass(slots=True)
@@ -36,6 +42,7 @@ class PipelineRuntime:
     evaluation: EvaluationHarness
 
     def run(self, scenario: ScenarioConfig, max_ticks: int) -> None:
+        latency = LatencyAccumulator()
         try:
             self.simulation.bootstrap(scenario)
             self.simulation.attach_sensors()
@@ -73,20 +80,48 @@ class PipelineRuntime:
                 bundle = self.sensors.capture(tick_id, sim_time_s)
                 self.context.event_bus.publish(TopicName.SENSOR_CAMERA_FRONT.value, bundle.front_camera)
                 self.context.event_bus.publish(TopicName.SENSOR_LIDAR.value, bundle.lidar)
+
+                # --- Timed pipeline stages ---
+                t0 = _time_ms()
                 detections, lanes, drivable_space, traffic_lights, _cones = self.perception.run(bundle)
+                t1 = _time_ms()
+                latency.record("perception", t1 - t0)
+
                 bundle.metadata["debug_perception_detections"] = detections
                 if self.visualization and hasattr(self.visualization, "update_bundle"):
                     self.visualization.update_bundle(bundle)
+
+                t0 = _time_ms()
                 ego_pose = self.localization.run(bundle)
+                t1 = _time_ms()
+                latency.record("localization", t1 - t0)
+
+                t0 = _time_ms()
                 local_map = self.mapping.run(detections, lanes, drivable_space, [], traffic_lights, ego_pose)
+                t1 = _time_ms()
+                latency.record("mapping", t1 - t0)
+
+                t0 = _time_ms()
                 predictions = self.prediction.run(local_map)
+                t1 = _time_ms()
+                latency.record("prediction", t1 - t0)
+
                 if hasattr(self.behavior_planner, "set_context"):
                     self.behavior_planner.set_context(local_map, predictions)
+
+                t0 = _time_ms()
                 behavior_state = self.behavior_planner.run(local_map, ego_pose)
                 trajectory = self.motion_planner.run(local_map, ego_pose, predictions, behavior_state)
+                t1 = _time_ms()
+                latency.record("planning", t1 - t0)
+
                 if hasattr(self.controller, "set_context"):
                     self.controller.set_context(local_map, predictions)
+
+                t0 = _time_ms()
                 command = self.controller.run(trajectory, ego_pose)
+                t1 = _time_ms()
+                latency.record("control", t1 - t0)
 
                 self.context.event_bus.publish(TopicName.PERCEPTION_DETECTIONS.value, detections)
                 self.context.event_bus.publish(TopicName.PERCEPTION_LANES.value, lanes)
@@ -102,6 +137,12 @@ class PipelineRuntime:
                 self.context.event_bus.publish(TopicName.PREDICTION_AGENTS.value, predictions)
                 self.context.event_bus.publish(TopicName.PLANNING_EGO_TRAJECTORY.value, trajectory)
                 self.context.event_bus.publish(TopicName.CONTROL_VEHICLE_COMMAND.value, command)
+
+                # Publish per-tick latency for the dashboard
+                tick_latency = latency.latest()
+                tick_latency["total"] = sum(tick_latency.values())
+                self.context.event_bus.publish(TopicName.PIPELINE_LATENCY.value, tick_latency)
+
                 self.context.event_bus.publish(
                     TopicName.TICK_COMPLETE.value,
                     {"tick_id": tick_id, "sim_time_s": sim_time_s},
@@ -115,6 +156,9 @@ class PipelineRuntime:
                         ReplayFrame(tick_id=tick_id, sim_time_s=sim_time_s, topic_payloads=snapshot)
                     )
         finally:
+            # Feed accumulated latency into evaluation harness
+            if hasattr(self.evaluation, "set_latency"):
+                self.evaluation.set_latency(latency)
             self.simulation.shutdown()
             if self.visualization:
                 self.visualization.flush()

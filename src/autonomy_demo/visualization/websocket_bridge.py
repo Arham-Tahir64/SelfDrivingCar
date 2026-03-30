@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import threading
 from typing import Any
+
+import numpy as np
 
 from autonomy_demo.common.logging import get_logger
 from autonomy_demo.common.serialization import serialize
@@ -11,7 +14,7 @@ from autonomy_demo.interfaces.enums import TopicName
 
 logger = get_logger(__name__)
 
-# Topics with large binary payloads that the BEV frontend does not need.
+# Topics with large binary payloads that need special handling.
 _SKIP_TOPICS = frozenset(
     {
         TopicName.SENSOR_CAMERA_FRONT.value,
@@ -19,6 +22,37 @@ _SKIP_TOPICS = frozenset(
         TopicName.PERCEPTION_DRIVABLE_SPACE.value,
     }
 )
+
+_LIDAR_MAX_POINTS = 2000
+_JPEG_QUALITY = 65
+
+
+def _encode_overlay_jpeg(frame_rgb: np.ndarray) -> str | None:
+    """Compress an RGB uint8 frame to base64-encoded JPEG."""
+    try:
+        import cv2  # type: ignore
+    except ImportError:
+        return None
+    # Resize to keep payload small (max 640px wide)
+    h, w = frame_rgb.shape[:2]
+    if w > 640:
+        scale = 640 / w
+        frame_rgb = cv2.resize(frame_rgb, (640, int(h * scale)), interpolation=cv2.INTER_AREA)
+    success, buf = cv2.imencode(".jpg", frame_rgb[:, :, ::-1], [cv2.IMWRITE_JPEG_QUALITY, _JPEG_QUALITY])
+    if not success:
+        return None
+    return base64.b64encode(buf.tobytes()).decode("ascii")
+
+
+def _downsample_lidar(points_xyz: np.ndarray) -> list[list[float]]:
+    """Downsample LiDAR points to a manageable count for the browser."""
+    n = points_xyz.shape[0]
+    if n == 0:
+        return []
+    if n > _LIDAR_MAX_POINTS:
+        indices = np.random.choice(n, _LIDAR_MAX_POINTS, replace=False)
+        points_xyz = points_xyz[indices]
+    return points_xyz.tolist()
 
 
 class WebSocketBridge:
@@ -76,6 +110,26 @@ class WebSocketBridge:
             "sim_time_s": sim_time_s,
             **serialize(filtered),
         }
+
+        # Inject compressed camera overlay (from NullVisualizationService)
+        overlay_frame = snapshot.get(TopicName.VISUALIZATION_CAMERA_OVERLAY.value)
+        if isinstance(overlay_frame, np.ndarray):
+            jpeg_b64 = _encode_overlay_jpeg(overlay_frame)
+            if jpeg_b64:
+                message[TopicName.VISUALIZATION_CAMERA_OVERLAY.value] = jpeg_b64
+
+        # Inject downsampled LiDAR preview
+        lidar_frame = snapshot.get(TopicName.SENSOR_LIDAR.value)
+        if lidar_frame is not None and hasattr(lidar_frame, "points_xyz"):
+            message[TopicName.VISUALIZATION_LIDAR_PREVIEW.value] = {
+                "points": _downsample_lidar(lidar_frame.points_xyz),
+            }
+
+        # Include pipeline latency if present
+        latency = snapshot.get(TopicName.PIPELINE_LATENCY.value)
+        if latency is not None:
+            message[TopicName.PIPELINE_LATENCY.value] = serialize(latency)
+
         try:
             text = json.dumps(message, default=str)
         except Exception:

@@ -13,6 +13,8 @@ const BEHAVIOR_COLORS: Record<string, string> = {
   GOAL_REACHED: "#00C853",
 };
 
+const LATENCY_BUDGET_MS = 100;
+
 function mpsToMph(mps: number): string {
   return (mps * 2.237).toFixed(1);
 }
@@ -32,6 +34,12 @@ function perceptionFallbackColor(fallbackState: string | undefined): string {
   }
 }
 
+function latencyColor(ms: number): string {
+  if (ms <= 15) return "#00C853";
+  if (ms <= 40) return "#FFC107";
+  return "#F44336";
+}
+
 export default function HUD() {
   const frame = useFrameStore((s) => s.currentFrame);
   const connected = useFrameStore((s) => s.connected);
@@ -41,6 +49,8 @@ export default function HUD() {
   const control = frame?.["control/vehicle_command"];
   const scenario = frame?.["system/scenario_info"];
   const perception = frame?.["perception/status"];
+  const latency = frame?.["pipeline/latency"];
+  const detections = frame?.["perception/detections"];
   const laneCount =
     frame?.["perception/lanes"]?.length ?? frame?.["map/local_map"]?.perceived_lanes?.length ?? 0;
   const behaviorState = traj?.behavior_state ?? "--";
@@ -52,6 +62,15 @@ export default function HUD() {
         .map(([key, value]) => `${key}:${value}`)
         .join(" ")
     : "";
+
+  // Detection counts by class
+  const detectionCounts: Record<string, number> = {};
+  if (detections) {
+    for (const d of detections) {
+      detectionCounts[d.object_class] = (detectionCounts[d.object_class] ?? 0) + 1;
+    }
+  }
+  const totalDetections = detections?.length ?? 0;
 
   return (
     <div style={styles.container}>
@@ -117,6 +136,31 @@ export default function HUD() {
             </div>
           </div>
         )}
+
+        {/* Detection counts */}
+        {totalDetections > 0 && (
+          <div style={{ marginTop: 10, display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+            <span style={{ color: "#666", fontSize: 10, fontWeight: 600, letterSpacing: 0.5 }}>
+              OBJECTS
+            </span>
+            {Object.entries(detectionCounts).map(([cls, count]) => (
+              <div
+                key={cls}
+                style={{
+                  padding: "2px 8px",
+                  borderRadius: 4,
+                  backgroundColor: "#ffffff0d",
+                  border: "1px solid #ffffff18",
+                  color: "#bbb",
+                  fontSize: 10,
+                }}
+              >
+                {cls}: {count}
+              </div>
+            ))}
+            <div style={{ color: "#666", fontSize: 10 }}>({totalDetections} total)</div>
+          </div>
+        )}
       </div>
 
       <div style={styles.bottomLeft}>
@@ -141,6 +185,59 @@ export default function HUD() {
         </div>
       </div>
 
+      {/* Latency panel */}
+      {latency && (
+        <div style={styles.latencyPanel}>
+          <div style={{ fontSize: 10, color: "#666", fontWeight: 600, letterSpacing: 0.5, marginBottom: 6 }}>
+            LATENCY
+          </div>
+          {(["perception", "localization", "mapping", "prediction", "planning", "control"] as const).map(
+            (module) => {
+              const ms = latency[module] ?? 0;
+              return (
+                <LatencyBar key={module} label={module.slice(0, 5).toUpperCase()} ms={ms} />
+              );
+            },
+          )}
+          <div
+            style={{
+              marginTop: 4,
+              paddingTop: 4,
+              borderTop: "1px solid #222",
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+            }}
+          >
+            <span style={{ fontSize: 10, color: "#888" }}>TOTAL</span>
+            <span
+              style={{
+                fontSize: 11,
+                fontWeight: 700,
+                color: latencyColor(latency.total ?? 0),
+              }}
+            >
+              {(latency.total ?? 0).toFixed(1)}ms
+            </span>
+          </div>
+          {/* Budget bar */}
+          <div style={{ marginTop: 4, width: "100%", height: 3, backgroundColor: "#1a1a24", borderRadius: 2 }}>
+            <div
+              style={{
+                width: `${Math.min(100, ((latency.total ?? 0) / LATENCY_BUDGET_MS) * 100)}%`,
+                height: "100%",
+                backgroundColor: latencyColor(latency.total ?? 0),
+                borderRadius: 2,
+                transition: "width 80ms",
+              }}
+            />
+          </div>
+          <div style={{ fontSize: 9, color: "#444", marginTop: 2, textAlign: "right" }}>
+            /{LATENCY_BUDGET_MS}ms budget
+          </div>
+        </div>
+      )}
+
       {control && (
         <div style={styles.bottomRight}>
           <ControlBar label="THR" value={control.throttle} color="#00E5FF" />
@@ -152,6 +249,30 @@ export default function HUD() {
       {control?.emergency_override && (
         <div style={styles.emergencyBanner}>EMERGENCY BRAKE</div>
       )}
+    </div>
+  );
+}
+
+function LatencyBar({ label, ms }: { label: string; ms: number }) {
+  const maxWidth = 60;
+  const barWidth = Math.min(maxWidth, (ms / 60) * maxWidth);
+  const color = latencyColor(ms);
+
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 3 }}>
+      <span style={{ fontSize: 9, color: "#666", width: 30, textAlign: "right" }}>{label}</span>
+      <div style={{ width: maxWidth, height: 4, backgroundColor: "#1a1a24", borderRadius: 2 }}>
+        <div
+          style={{
+            width: barWidth,
+            height: "100%",
+            backgroundColor: color,
+            borderRadius: 2,
+            transition: "width 80ms",
+          }}
+        />
+      </div>
+      <span style={{ fontSize: 9, color: "#888", width: 36 }}>{ms.toFixed(1)}ms</span>
     </div>
   );
 }
@@ -214,6 +335,16 @@ const styles: Record<string, React.CSSProperties> = {
     position: "absolute",
     bottom: 24,
     left: 24,
+  },
+  latencyPanel: {
+    position: "absolute",
+    top: 16,
+    right: 16,
+    backgroundColor: "#0a0a0fcc",
+    border: "1px solid #1f1f2e",
+    borderRadius: 8,
+    padding: "10px 14px",
+    minWidth: 160,
   },
   bottomRight: {
     position: "absolute",

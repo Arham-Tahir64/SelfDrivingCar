@@ -17,6 +17,15 @@ class SpawnedActorSummary:
     prop_actor_ids: list[int] | None = None
 
 
+@dataclass(slots=True)
+class NpcMotionPlan:
+    actor: object
+    behavior: str
+    route_xy: list[tuple[float, float]]
+    waypoint_index: int = 0
+    target_speed_mps: float = 7.0
+
+
 class StubSimulationBackend:
     """Deterministic no-CARLA backend for tests and local development."""
 
@@ -55,6 +64,7 @@ class CarlaSimulationBackend(StubSimulationBackend):
         super().__init__(runtime_config)
         self.logger = get_logger(__name__, backend="carla")
         self.state = CarlaSessionState()
+        self._npc_motion_plans: list[NpcMotionPlan] = []
 
     def bootstrap(self, scenario) -> None:
         self.state.carla = ensure_carla_importable(self.runtime_config.carla_python_api_wheel)
@@ -195,12 +205,23 @@ class CarlaSimulationBackend(StubSimulationBackend):
 
     def _spawn_scenario_actors(self, scenario) -> None:
         for npc in scenario.npcs:
+            npc_yaw = float(npc.spawn.yaw)
+            explicit_yaw = abs(npc_yaw) > 1e-3
+            npc_goal_x: float | None = None
+            npc_goal_y: float | None = None
+            if npc.route:
+                first_wp = npc.route[0]
+                npc_goal_x = float(first_wp.x)
+                npc_goal_y = float(first_wp.y)
             transform = self._resolve_vehicle_spawn_transform(
                 x=float(npc.spawn.x),
                 y=float(npc.spawn.y),
                 z=float(npc.spawn.z),
-                yaw=float(npc.spawn.yaw),
+                yaw=npc_yaw,
                 actor_label=f"npc:{npc.model}",
+                goal_x=npc_goal_x,
+                goal_y=npc_goal_y,
+                explicit_yaw=explicit_yaw,
             )
             try:
                 blueprint = self.state.blueprint_library.find(npc.model)
@@ -210,6 +231,18 @@ class CarlaSimulationBackend(StubSimulationBackend):
             actor = self.state.world.try_spawn_actor(blueprint, transform)
             if actor is not None:
                 self.state.npc_actors.append(actor)
+                route_xy = self._resolve_npc_route_xy(
+                    spawn_xy=(transform.location.x, transform.location.y),
+                    route_points=npc.route,
+                )
+                self._npc_motion_plans.append(
+                    NpcMotionPlan(
+                        actor=actor,
+                        behavior=str(npc.behavior),
+                        route_xy=route_xy,
+                        target_speed_mps=self._npc_target_speed_mps(str(npc.behavior)),
+                    )
+                )
             else:
                 self.logger.warning(
                     "Failed to spawn NPC %s at resolved transform %s",
@@ -242,6 +275,7 @@ class CarlaSimulationBackend(StubSimulationBackend):
         actor_label: str,
         goal_x: float | None = None,
         goal_y: float | None = None,
+        explicit_yaw: bool = False,
     ):
         carla = self.state.carla
         requested_location = carla.Location(x=x, y=y, z=z)
@@ -251,14 +285,15 @@ class CarlaSimulationBackend(StubSimulationBackend):
             project_to_road=True,
             lane_type=carla.LaneType.Driving,
         )
+        has_yaw = explicit_yaw or abs(yaw) > 1e-3
         candidates = []
         if road_waypoint is not None:
             resolved = road_waypoint.transform
             resolved.location.z += 0.5
-            if abs(yaw) > 1e-3:
+            if has_yaw:
                 resolved.rotation.yaw = yaw
             candidates.append(resolved)
-            if goal_x is None or goal_y is None or abs(yaw) > 1e-3:
+            if goal_x is None or goal_y is None or has_yaw:
                 self.logger.info(
                     "Resolved %s spawn from (%s, %s, %s, yaw=%s) to road waypoint (%s, %s, %s, yaw=%s)",
                     actor_label,
@@ -273,7 +308,7 @@ class CarlaSimulationBackend(StubSimulationBackend):
                 )
                 return resolved
 
-        if goal_x is not None and goal_y is not None and abs(yaw) <= 1e-3 and spawn_points:
+        if goal_x is not None and goal_y is not None and not has_yaw and spawn_points:
             ranked_spawn_points = sorted(
                 spawn_points,
                 key=lambda transform: self._distance_sq_xy(transform.location.x, transform.location.y, x, y),
@@ -328,7 +363,7 @@ class CarlaSimulationBackend(StubSimulationBackend):
                 ),
             )
             fallback.location.z += 0.5
-            if abs(yaw) > 1e-3:
+            if has_yaw:
                 fallback.rotation.yaw = yaw
             self.logger.warning(
                 "Could not project %s spawn to a driving lane; using nearest spawn point (%s, %s, %s, yaw=%s)",
@@ -399,6 +434,7 @@ class CarlaSimulationBackend(StubSimulationBackend):
     def tick(self, tick_id: int) -> None:
         if self.state.world is None:
             raise CarlaRuntimeError("CARLA world is not initialized.")
+        self._update_npc_motion()
         self.current_frame = self.state.world.tick()
         self.state.current_frame = self.current_frame
         self.current_snapshot = self.state.world.get_snapshot()
@@ -439,6 +475,209 @@ class CarlaSimulationBackend(StubSimulationBackend):
         )
         self.state.ego_actor.apply_control(vehicle_control)
 
+    def _resolve_npc_route_xy(self, *, spawn_xy: tuple[float, float], route_points) -> list[tuple[float, float]]:
+        route_xy: list[tuple[float, float]] = []
+        leg_start_xy = (float(spawn_xy[0]), float(spawn_xy[1]))
+        for point in route_points or []:
+            segment_xy = self._build_lane_following_route_xy(
+                start_xy=leg_start_xy,
+                goal_xy=(float(point.x), float(point.y)),
+            )
+            if not segment_xy:
+                location = self._project_to_driving_location(float(point.x), float(point.y))
+                segment_xy = [(float(location.x), float(location.y))]
+            if route_xy and segment_xy:
+                first_segment_point = segment_xy[0]
+                if self._distance_sq_xy(
+                    route_xy[-1][0],
+                    route_xy[-1][1],
+                    first_segment_point[0],
+                    first_segment_point[1],
+                ) <= 1.0:
+                    segment_xy = segment_xy[1:]
+            route_xy.extend(segment_xy)
+            if route_xy:
+                leg_start_xy = route_xy[-1]
+        if route_xy:
+            return route_xy
+        return [self._project_forward_goal_xy(spawn_xy=spawn_xy, distance_m=30.0)]
+
+    def _build_lane_following_route_xy(
+        self,
+        *,
+        start_xy: tuple[float, float],
+        goal_xy: tuple[float, float],
+        step_m: float = 6.0,
+        max_steps: int = 64,
+    ) -> list[tuple[float, float]]:
+        start_location = self._project_to_driving_location(start_xy[0], start_xy[1])
+        goal_location = self._project_to_driving_location(goal_xy[0], goal_xy[1])
+        current_waypoint = self.state.world.get_map().get_waypoint(
+            start_location,
+            project_to_road=True,
+            lane_type=self.state.carla.LaneType.Driving,
+        )
+        if current_waypoint is None:
+            return []
+        goal_distance_m = math.hypot(
+            float(goal_location.x) - float(current_waypoint.transform.location.x),
+            float(goal_location.y) - float(current_waypoint.transform.location.y),
+        )
+        route_xy: list[tuple[float, float]] = []
+        for _ in range(max_steps):
+            if goal_distance_m <= max(step_m * 0.75, 3.0):
+                break
+            next_waypoints = list(current_waypoint.next(float(step_m)))
+            if not next_waypoints:
+                break
+            best_waypoint = min(
+                next_waypoints,
+                key=lambda waypoint: self._route_waypoint_score(
+                    waypoint=waypoint,
+                    goal_xy=(float(goal_location.x), float(goal_location.y)),
+                ),
+            )
+            best_location = best_waypoint.transform.location
+            best_distance_m = math.hypot(
+                float(goal_location.x) - float(best_location.x),
+                float(goal_location.y) - float(best_location.y),
+            )
+            if best_distance_m >= goal_distance_m - 0.1:
+                break
+            route_xy.append((float(best_location.x), float(best_location.y)))
+            current_waypoint = best_waypoint
+            goal_distance_m = best_distance_m
+        return route_xy
+
+    def _project_to_driving_location(self, x: float, y: float):
+        requested_location = self.state.carla.Location(x=float(x), y=float(y), z=0.0)
+        waypoint = self.state.world.get_map().get_waypoint(
+            requested_location,
+            project_to_road=True,
+            lane_type=self.state.carla.LaneType.Driving,
+        )
+        if waypoint is None:
+            return requested_location
+        return waypoint.transform.location
+
+    def _project_forward_goal_xy(self, *, spawn_xy: tuple[float, float], distance_m: float) -> tuple[float, float]:
+        start_location = self._project_to_driving_location(spawn_xy[0], spawn_xy[1])
+        waypoint = self.state.world.get_map().get_waypoint(
+            start_location,
+            project_to_road=True,
+            lane_type=self.state.carla.LaneType.Driving,
+        )
+        if waypoint is None:
+            return spawn_xy
+        next_waypoints = waypoint.next(float(distance_m))
+        if next_waypoints:
+            target = next_waypoints[0].transform.location
+            return (float(target.x), float(target.y))
+        fallback = waypoint.transform.location
+        return (float(fallback.x), float(fallback.y))
+
+    @classmethod
+    def _route_waypoint_score(
+        cls,
+        *,
+        waypoint,
+        goal_xy: tuple[float, float],
+    ) -> float:
+        goal_dx = float(goal_xy[0]) - float(waypoint.transform.location.x)
+        goal_dy = float(goal_xy[1]) - float(waypoint.transform.location.y)
+        distance_sq = (goal_dx ** 2) + (goal_dy ** 2)
+        goal_norm = math.hypot(goal_dx, goal_dy)
+        if goal_norm <= 1e-6:
+            return distance_sq
+        heading_rad = math.radians(float(waypoint.transform.rotation.yaw))
+        forward_x = math.cos(heading_rad)
+        forward_y = math.sin(heading_rad)
+        alignment = ((forward_x * goal_dx) + (forward_y * goal_dy)) / goal_norm
+        alignment_penalty = (1.0 - alignment) * 20.0
+        if alignment < 0.0:
+            alignment_penalty += 40.0
+        return distance_sq + alignment_penalty
+
+    @staticmethod
+    def _npc_target_speed_mps(behavior: str) -> float:
+        behavior_key = behavior.strip().lower()
+        if behavior_key == "cross_traffic":
+            return 6.0
+        if behavior_key == "parked":
+            return 0.0
+        return 8.0
+
+    def _update_npc_motion(self) -> None:
+        if not self._npc_motion_plans:
+            return
+        for plan in list(self._npc_motion_plans):
+            actor = plan.actor
+            if actor is None or not getattr(actor, "is_alive", True):
+                continue
+            self._apply_npc_motion_plan(plan)
+
+    def _apply_npc_motion_plan(self, plan: NpcMotionPlan) -> None:
+        transform = plan.actor.get_transform()
+        velocity = plan.actor.get_velocity()
+        speed_mps = math.hypot(float(velocity.x), float(velocity.y))
+        target_xy = self._advance_npc_target(plan, transform.location.x, transform.location.y)
+        dx = float(target_xy[0]) - float(transform.location.x)
+        dy = float(target_xy[1]) - float(transform.location.y)
+        distance_m = math.hypot(dx, dy)
+        target_heading_deg = math.degrees(math.atan2(dy, dx))
+        yaw_error_deg = self._normalize_angle_deg(target_heading_deg - float(transform.rotation.yaw))
+
+        target_speed_mps = float(plan.target_speed_mps)
+        if plan.waypoint_index >= len(plan.route_xy) - 1:
+            target_speed_mps = min(target_speed_mps, max(distance_m * 0.8, 0.0))
+
+        steer = max(-0.8, min(0.8, yaw_error_deg / 35.0))
+        throttle = 0.0
+        brake = 0.0
+        if target_speed_mps <= 0.1 and distance_m <= 2.0:
+            brake = 0.6 if speed_mps > 0.2 else 0.2
+        elif abs(yaw_error_deg) > 85.0 and speed_mps > 1.0:
+            brake = 0.35
+        else:
+            speed_error = target_speed_mps - speed_mps
+            if speed_error > 0.2:
+                throttle = min(0.65, 0.2 + (speed_error / max(target_speed_mps, 1.0)) * 0.45)
+            elif speed_error < -0.5:
+                brake = min(0.55, abs(speed_error) / max(target_speed_mps + 1.0, 1.0))
+        if distance_m <= 1.5 and plan.waypoint_index >= len(plan.route_xy) - 1:
+            throttle = 0.0
+            brake = 0.7 if speed_mps > 0.1 else 0.3
+
+        plan.actor.apply_control(
+            self.state.carla.VehicleControl(
+                throttle=float(throttle),
+                steer=float(steer),
+                brake=float(brake),
+                hand_brake=False,
+                reverse=False,
+            )
+        )
+
+    def _advance_npc_target(
+        self,
+        plan: NpcMotionPlan,
+        current_x: float,
+        current_y: float,
+    ) -> tuple[float, float]:
+        if not plan.route_xy:
+            return (float(current_x), float(current_y))
+        while plan.waypoint_index < len(plan.route_xy) - 1:
+            target = plan.route_xy[plan.waypoint_index]
+            if math.hypot(float(target[0]) - float(current_x), float(target[1]) - float(current_y)) > 4.0:
+                break
+            plan.waypoint_index += 1
+        return plan.route_xy[plan.waypoint_index]
+
+    @staticmethod
+    def _normalize_angle_deg(angle_deg: float) -> float:
+        normalized = (float(angle_deg) + 180.0) % 360.0 - 180.0
+        return normalized
+
     def shutdown(self) -> None:
         for actor in list(self.state.sensor_actors.values()):
             try:
@@ -457,6 +696,7 @@ class CarlaSimulationBackend(StubSimulationBackend):
                 pass
         self.state.npc_actors.clear()
         self.state.prop_actors.clear()
+        self._npc_motion_plans.clear()
         if self.state.ego_actor is not None:
             try:
                 self.state.ego_actor.destroy()

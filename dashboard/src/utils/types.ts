@@ -115,6 +115,21 @@ export interface PerceptionStatus {
   traffic_light_count: number;
 }
 
+export interface PipelineLatency {
+  perception: number;
+  localization: number;
+  mapping: number;
+  prediction: number;
+  planning: number;
+  control: number;
+  total: number;
+  [key: string]: number;
+}
+
+export interface LidarPreview {
+  points: number[][];
+}
+
 export interface PipelineFrame {
   tick_id: number;
   sim_time_s: number;
@@ -128,4 +143,7 @@ export interface PipelineFrame {
   "control/vehicle_command"?: ControlCommand;
   "perception/status"?: PerceptionStatus;
   "system/scenario_info"?: ScenarioInfo;
+  "visualization/camera_overlay"?: string;
+  "visualization/lidar_preview"?: LidarPreview;
+  "pipeline/latency"?: PipelineLatency;
 }

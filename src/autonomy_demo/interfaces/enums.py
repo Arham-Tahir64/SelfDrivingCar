@@ -66,3 +66,6 @@ class TopicName(str, Enum):
     CONTROL_VEHICLE_COMMAND = "control/vehicle_command"
     TICK_COMPLETE = "system/tick_complete"
     SCENARIO_INFO = "system/scenario_info"
+    VISUALIZATION_CAMERA_OVERLAY = "visualization/camera_overlay"
+    VISUALIZATION_LIDAR_PREVIEW = "visualization/lidar_preview"
+    PIPELINE_LATENCY = "pipeline/latency"

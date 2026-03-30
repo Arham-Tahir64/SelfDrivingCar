@@ -30,10 +30,12 @@ class NullVisualizationService:
         self._latest_trajectory: EgoTrajectory | None = None
         self._latest_command: ControlCommand | None = None
         self._latest_overlay: np.ndarray | None = None
+        self._event_bus: Any = None
 
     def attach(self, event_bus) -> None:
         if not self.enabled:
             return
+        self._event_bus = event_bus
         event_bus.subscribe("*", self._handle)
         self.logger.info("Visualization subscriber attached")
 
@@ -58,6 +60,11 @@ class NullVisualizationService:
         elif topic == TopicName.CONTROL_VEHICLE_COMMAND.value and isinstance(payload, ControlCommand):
             self._latest_command = payload
             self._latest_overlay = self._render_overlay()
+            if self._latest_overlay is not None and self._event_bus is not None:
+                self._event_bus.publish(
+                    TopicName.VISUALIZATION_CAMERA_OVERLAY.value,
+                    self._latest_overlay,
+                )
 
     def flush(self) -> None:
         if self.enabled:

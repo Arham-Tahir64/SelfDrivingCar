@@ -9,6 +9,7 @@ import numpy as np
 
 from autonomy_demo.common.geometry import distance_xyz
 from autonomy_demo.common.logging import get_logger
+from autonomy_demo.eval.metrics import LatencyAccumulator
 from autonomy_demo.interfaces.enums import TopicName
 from autonomy_demo.interfaces.types import ControlCommand, DrivableSpaceMask, EgoPose, EgoTrajectory, EvaluationSummary, LaneLine, ObjectDetection, RoutePlan
 from autonomy_demo.planning.route_following import route_progress_distance
@@ -108,6 +109,10 @@ class LiveEvaluationHarness:
         self.previous_command_mode: str | None = None
         self.red_light_stop_checks = 0
         self.red_light_stop_successes = 0
+        self._latency: LatencyAccumulator | None = None
+
+    def set_latency(self, latency: LatencyAccumulator) -> None:
+        self._latency = latency
 
     def set_route_plan(self, route_plan: RoutePlan | None) -> None:
         self.route_plan = route_plan
@@ -280,7 +285,7 @@ class LiveEvaluationHarness:
             collision_count=collision_count,
             red_light_violations=0,
             pedestrian_clearance_min_m=max(self.scenario.eval.min_pedestrian_clearance_m, 0.0),
-            latency_ms={},
+            latency_ms=self._latency.mean() if self._latency else {},
             distance_traveled_m=float(self.distance_traveled_m),
             goal_reached=bool(self.goal_reached),
             sim_duration_s=sim_duration_s,
