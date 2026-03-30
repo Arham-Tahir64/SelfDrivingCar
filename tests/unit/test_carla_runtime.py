@@ -92,9 +92,27 @@ class _Backend:
         self.state = type("State", (), {"carla": None, "world": None, "ego_actor": None})()
 
 
+class _FakeLocation:
+    def __init__(self, x: float, y: float, z: float = 0.0) -> None:
+        self.x = x
+        self.y = y
+        self.z = z
+
+
+class _FakeRotation:
+    def __init__(self, yaw: float) -> None:
+        self.yaw = yaw
+
+
+class _FakeTransform:
+    def __init__(self, x: float, y: float, yaw: float) -> None:
+        self.location = _FakeLocation(x, y, 0.5)
+        self.rotation = _FakeRotation(yaw)
+
+
 def test_carla_sensor_converters() -> None:
     suite = CarlaSensorSuite({"sensors": {}}, _Backend())
-    camera = suite._camera_frame("front_camera", _FakeImage())
+    camera = suite._camera_frame("front_camera", _FakeImage(), current_frame=7)
     lidar = suite._lidar_frame(_FakeLidar())
     radar = suite._radar_frame(_FakeRadar())
     imu = suite._imu_reading(_FakeImu())
@@ -104,3 +122,19 @@ def test_carla_sensor_converters() -> None:
     assert radar.detections.shape == (1, 4)
     assert imu.acceleration_xyz.shape == (3,)
     assert gnss.world_xyz.tolist() == [1.0, 2.0, 3.0]
+
+
+def test_spawn_candidate_score_prefers_goal_aligned_transform() -> None:
+    aligned = _FakeTransform(12.0, -18.0, 90.0)
+    wrong_way = _FakeTransform(12.0, -18.0, -90.0)
+    aligned_score = CarlaSimulationBackend._spawn_candidate_score(
+        transform=aligned,
+        requested_xy=(15.0, -20.0),
+        goal_xy=(15.0, 80.0),
+    )
+    wrong_way_score = CarlaSimulationBackend._spawn_candidate_score(
+        transform=wrong_way,
+        requested_xy=(15.0, -20.0),
+        goal_xy=(15.0, 80.0),
+    )
+    assert aligned_score < wrong_way_score

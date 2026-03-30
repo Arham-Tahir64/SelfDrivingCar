@@ -41,9 +41,12 @@ export default function HUD() {
   const control = frame?.["control/vehicle_command"];
   const scenario = frame?.["system/scenario_info"];
   const perception = frame?.["perception/status"];
+  const laneCount =
+    frame?.["perception/lanes"]?.length ?? frame?.["map/local_map"]?.perceived_lanes?.length ?? 0;
   const behaviorState = traj?.behavior_state ?? "--";
   const behaviorColor = BEHAVIOR_COLORS[behaviorState] ?? "#888";
   const fallbackColor = perceptionFallbackColor(perception?.fallback_state);
+  const laneBadgeColor = laneCount > 0 ? modalityColorCss("camera") : "#F44336";
   const modalityCounts = perception
     ? Object.entries(perception.counts_by_modality)
         .map(([key, value]) => `${key}:${value}`)
@@ -97,6 +100,20 @@ export default function HUD() {
             <div style={{ color: "#8b93a7", fontSize: 11 }}>
               {perception.fallback_state}
               {modalityCounts ? ` | ${modalityCounts}` : ""}
+            </div>
+            <div
+              style={{
+                padding: "4px 10px",
+                borderRadius: 999,
+                border: `1px solid ${laneBadgeColor}`,
+                color: laneBadgeColor,
+                backgroundColor: `${laneBadgeColor}22`,
+                fontSize: 11,
+                fontWeight: 700,
+                letterSpacing: 0.4,
+              }}
+            >
+              {laneCount > 0 ? "CAMERA LANES" : "LANE DEGRADED"}
             </div>
           </div>
         )}

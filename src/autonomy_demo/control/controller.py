@@ -129,11 +129,10 @@ class RouteFollowerController:
         return command
 
     def _lead_vehicle_risk(self, ego_pose: EgoPose) -> tuple[float, float] | None:
-        if not self._latest_predictions:
-            return None
         current_lane = None
         ego_projection = None
         detections_by_track: dict[int, object] = {}
+        current_detections: list[object] = []
         if self._latest_local_map is not None:
             current_lane = next(
                 (
@@ -145,9 +144,20 @@ class RouteFollowerController:
             )
             if current_lane is not None:
                 ego_projection = project_point_to_centerline(current_lane.centerline_world, ego_pose.world_xyz)
+            current_detections = list(self._latest_local_map.dynamic_agents)
             detections_by_track = {
                 int(agent.track_id): agent for agent in self._latest_local_map.dynamic_agents
             }
+        direct_detection_risk = self._direct_vehicle_risk(
+            ego_pose,
+            current_lane=current_lane,
+            ego_projection=ego_projection,
+            detections=current_detections,
+        )
+        if direct_detection_risk is not None:
+            return direct_detection_risk
+        if not self._latest_predictions:
+            return None
         ego_xy = np.asarray(ego_pose.world_xyz, dtype=np.float32)[:2]
         heading_vec = np.array([math.cos(ego_pose.yaw_rad), math.sin(ego_pose.yaw_rad)], dtype=np.float32)
         best: tuple[float, float] | None = None
@@ -159,7 +169,12 @@ class RouteFollowerController:
             if detection is not None and current_lane is not None and ego_projection is not None:
                 if getattr(detection, "track_state", TrackState.TENTATIVE) != TrackState.CONFIRMED:
                     continue
-                if float(getattr(detection, "confidence", 0.0)) < 0.55:
+                confidence_threshold = (
+                    0.25
+                    if str(getattr(detection, "source_modality", "")) in {"camera", "fused"}
+                    else 0.55
+                )
+                if float(getattr(detection, "confidence", 0.0)) < confidence_threshold:
                     continue
                 world_bbox = np.asarray(detection.world_bbox_3d, dtype=np.float32)
                 size_xyz = np.max(world_bbox, axis=0) - np.min(world_bbox, axis=0)
@@ -186,6 +201,65 @@ class RouteFollowerController:
                 if longitudinal_gap <= 0.0 or lateral_gap > 3.0:
                     continue
                 lead_speed = float(predicted.velocity)
+            closing_speed = max(ego_pose.speed_mps - lead_speed, 0.1)
+            ttc_s = longitudinal_gap / closing_speed
+            if best is None or longitudinal_gap < best[0]:
+                best = (float(longitudinal_gap), float(ttc_s))
+        return best
+
+    def _direct_vehicle_risk(
+        self,
+        ego_pose: EgoPose,
+        *,
+        current_lane,
+        ego_projection,
+        detections: list[object],
+    ) -> tuple[float, float] | None:
+        if not detections:
+            return None
+        ego_xy = np.asarray(ego_pose.world_xyz, dtype=np.float32)[:2]
+        heading_vec = np.array([math.cos(ego_pose.yaw_rad), math.sin(ego_pose.yaw_rad)], dtype=np.float32)
+        best: tuple[float, float] | None = None
+        for detection in detections:
+            detection_class = getattr(detection, "object_class", None)
+            if detection_class is None:
+                continue
+            object_class = getattr(detection_class, "value", str(detection_class))
+            if object_class != "vehicle":
+                continue
+            confidence = float(getattr(detection, "confidence", 0.0))
+            modality = str(getattr(detection, "source_modality", ""))
+            threshold = 0.2 if modality in {"camera", "fused"} else 0.5
+            if confidence < threshold:
+                continue
+            if getattr(detection, "track_state", TrackState.TENTATIVE) == TrackState.DELETED:
+                continue
+            world_bbox = np.asarray(getattr(detection, "world_bbox_3d", np.zeros((8, 3), dtype=np.float32)), dtype=np.float32)
+            if world_bbox.shape != (8, 3):
+                continue
+            size_xyz = np.max(world_bbox, axis=0) - np.min(world_bbox, axis=0)
+            if (
+                max(float(size_xyz[0]), float(size_xyz[1])) > 10.0
+                or min(float(size_xyz[0]), float(size_xyz[1])) > 4.5
+                or float(size_xyz[2]) > 4.5
+            ):
+                continue
+            center_xyz = np.mean(world_bbox, axis=0)
+            if current_lane is not None and ego_projection is not None:
+                projection = project_point_to_centerline(current_lane.centerline_world, center_xyz)
+                longitudinal_gap = float(projection.s - ego_projection.s)
+                lateral_gap = float(abs(projection.d))
+                if longitudinal_gap <= 0.0 or lateral_gap > 3.5:
+                    continue
+            else:
+                delta = center_xyz[:2] - ego_xy
+                longitudinal_gap = float(np.dot(delta, heading_vec))
+                lateral_gap = float(abs((-heading_vec[1] * delta[0]) + (heading_vec[0] * delta[1])))
+                if longitudinal_gap <= 0.0 or lateral_gap > 3.0:
+                    continue
+            lead_speed = float(
+                np.linalg.norm(np.asarray(getattr(detection, "velocity", [0.0, 0.0]), dtype=np.float32)[:2])
+            )
             closing_speed = max(ego_pose.speed_mps - lead_speed, 0.1)
             ttc_s = longitudinal_gap / closing_speed
             if best is None or longitudinal_gap < best[0]:

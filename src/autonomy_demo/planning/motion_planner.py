@@ -72,6 +72,9 @@ class FrenetMotionPlanner:
         predictions: list[AgentPrediction],
         behavior_state: BehaviorState,
     ) -> EgoTrajectory:
+        route_guided = self._route_guided_trajectory(local_map, ego_pose, behavior_state)
+        if route_guided is not None:
+            return route_guided
         reference_lane = self._reference_lane(local_map, ego_pose)
         if reference_lane is None:
             return self._fallback.run(local_map, ego_pose, predictions, behavior_state)
@@ -81,6 +84,45 @@ class FrenetMotionPlanner:
             return self._fallback.run(local_map, ego_pose, predictions, behavior_state)
         best = min(candidates, key=lambda candidate: candidate.score)
         return best.trajectory
+
+    def _route_guided_trajectory(
+        self,
+        local_map: LocalMap,
+        ego_pose: EgoPose,
+        behavior_state: BehaviorState,
+    ) -> EgoTrajectory | None:
+        if self.route_plan is None or behavior_state in {BehaviorState.PREPARE_MERGE, BehaviorState.MERGING}:
+            return None
+        base = self._fallback.run(local_map, ego_pose, [], behavior_state)
+        if not base.waypoints:
+            return None
+        target_speed_mps = self._speed_profiles(ego_pose, behavior_state)[0]
+        stop_distance_m = self._stop_distance(local_map, behavior_state)
+        traveled_m = 0.0
+        waypoints: list[Waypoint] = []
+        for index, waypoint in enumerate(base.waypoints):
+            commanded_speed = target_speed_mps
+            if stop_distance_m is not None:
+                remaining = max(stop_distance_m - traveled_m, 0.0)
+                commanded_speed = min(
+                    commanded_speed,
+                    max(remaining / max(self.dt_s * max(len(base.waypoints) - index, 1), 1e-3), 0.0),
+                )
+            waypoints.append(
+                Waypoint(
+                    x=float(waypoint.x),
+                    y=float(waypoint.y),
+                    yaw=float(waypoint.yaw),
+                    velocity=float(commanded_speed),
+                    timestamp=float(index * self.dt_s),
+                )
+            )
+            traveled_m += float(commanded_speed * self.dt_s)
+        return EgoTrajectory(
+            waypoints=waypoints,
+            cost=float(base.cost),
+            behavior_state=base.behavior_state,
+        )
 
     def _reference_lane(self, local_map: LocalMap, ego_pose: EgoPose):
         if not local_map.static_lanes:

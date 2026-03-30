@@ -3,6 +3,8 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 
+import math
+
 from autonomy_demo.common.exceptions import CarlaRuntimeError
 from autonomy_demo.common.logging import get_logger
 from autonomy_demo.sim.carla_runtime import CarlaSessionState, ensure_carla_importable, weather_from_name
@@ -152,6 +154,8 @@ class CarlaSimulationBackend(StubSimulationBackend):
             z=float(scenario.ego_spawn.z),
             yaw=float(scenario.ego_spawn.yaw),
             actor_label="ego",
+            goal_x=float(scenario.ego_goal.x),
+            goal_y=float(scenario.ego_goal.y),
         )
         actor = self.state.world.try_spawn_actor(blueprint, transform)
         if actor is None:
@@ -236,19 +240,72 @@ class CarlaSimulationBackend(StubSimulationBackend):
         z: float,
         yaw: float,
         actor_label: str,
+        goal_x: float | None = None,
+        goal_y: float | None = None,
     ):
         carla = self.state.carla
         requested_location = carla.Location(x=x, y=y, z=z)
+        spawn_points = self.state.world.get_map().get_spawn_points()
         road_waypoint = self.state.world.get_map().get_waypoint(
             requested_location,
             project_to_road=True,
             lane_type=carla.LaneType.Driving,
         )
+        candidates = []
         if road_waypoint is not None:
             resolved = road_waypoint.transform
             resolved.location.z += 0.5
             if abs(yaw) > 1e-3:
                 resolved.rotation.yaw = yaw
+            candidates.append(resolved)
+            if goal_x is None or goal_y is None or abs(yaw) > 1e-3:
+                self.logger.info(
+                    "Resolved %s spawn from (%s, %s, %s, yaw=%s) to road waypoint (%s, %s, %s, yaw=%s)",
+                    actor_label,
+                    x,
+                    y,
+                    z,
+                    yaw,
+                    round(resolved.location.x, 2),
+                    round(resolved.location.y, 2),
+                    round(resolved.location.z, 2),
+                    round(resolved.rotation.yaw, 2),
+                )
+                return resolved
+
+        if goal_x is not None and goal_y is not None and abs(yaw) <= 1e-3 and spawn_points:
+            ranked_spawn_points = sorted(
+                spawn_points,
+                key=lambda transform: self._distance_sq_xy(transform.location.x, transform.location.y, x, y),
+            )[:12]
+            for spawn_point in ranked_spawn_points:
+                candidate = self._copy_transform(
+                    location_xyz=(spawn_point.location.x, spawn_point.location.y, spawn_point.location.z + 0.5),
+                    yaw_deg=spawn_point.rotation.yaw,
+                )
+                candidates.append(candidate)
+            if candidates:
+                best = min(
+                    candidates,
+                    key=lambda transform: self._spawn_candidate_score(
+                        transform=transform,
+                        requested_xy=(x, y),
+                        goal_xy=(goal_x, goal_y),
+                    ),
+                )
+                self.logger.info(
+                    "Resolved %s spawn using goal-aware candidate (%s, %s, %s, yaw=%s) for goal (%s, %s)",
+                    actor_label,
+                    round(best.location.x, 2),
+                    round(best.location.y, 2),
+                    round(best.location.z, 2),
+                    round(best.rotation.yaw, 2),
+                    round(goal_x, 2),
+                    round(goal_y, 2),
+                )
+                return best
+
+        if road_waypoint is not None:
             self.logger.info(
                 "Resolved %s spawn from (%s, %s, %s, yaw=%s) to road waypoint (%s, %s, %s, yaw=%s)",
                 actor_label,
@@ -263,7 +320,6 @@ class CarlaSimulationBackend(StubSimulationBackend):
             )
             return resolved
 
-        spawn_points = self.state.world.get_map().get_spawn_points()
         if spawn_points:
             fallback = min(
                 spawn_points,
@@ -292,6 +348,48 @@ class CarlaSimulationBackend(StubSimulationBackend):
             carla.Location(x=x, y=y, z=z + 0.5),
             carla.Rotation(yaw=yaw),
         )
+
+    def _copy_transform(self, *, location_xyz: tuple[float, float, float], yaw_deg: float):
+        return self.state.carla.Transform(
+            self.state.carla.Location(
+                x=float(location_xyz[0]),
+                y=float(location_xyz[1]),
+                z=float(location_xyz[2]),
+            ),
+            self.state.carla.Rotation(yaw=float(yaw_deg)),
+        )
+
+    @staticmethod
+    def _distance_sq_xy(x1: float, y1: float, x2: float, y2: float) -> float:
+        return ((float(x1) - float(x2)) ** 2) + ((float(y1) - float(y2)) ** 2)
+
+    @classmethod
+    def _spawn_candidate_score(
+        cls,
+        *,
+        transform,
+        requested_xy: tuple[float, float],
+        goal_xy: tuple[float, float],
+    ) -> float:
+        distance_sq = cls._distance_sq_xy(
+            transform.location.x,
+            transform.location.y,
+            requested_xy[0],
+            requested_xy[1],
+        )
+        goal_dx = float(goal_xy[0]) - float(transform.location.x)
+        goal_dy = float(goal_xy[1]) - float(transform.location.y)
+        goal_norm = math.hypot(goal_dx, goal_dy)
+        if goal_norm <= 1e-6:
+            return distance_sq
+        heading_rad = math.radians(float(transform.rotation.yaw))
+        forward_x = math.cos(heading_rad)
+        forward_y = math.sin(heading_rad)
+        alignment = ((forward_x * goal_dx) + (forward_y * goal_dy)) / goal_norm
+        alignment_penalty = (1.0 - alignment) * 40.0
+        if alignment < 0.0:
+            alignment_penalty += 60.0
+        return distance_sq + alignment_penalty
 
     def attach_sensors(self) -> None:
         if self.state.ego_actor is None:

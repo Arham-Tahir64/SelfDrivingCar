@@ -183,6 +183,8 @@ def test_mapping_module_returns_nearby_lane_graph_segments() -> None:
     )
     assert local_map.static_lanes
     assert local_map.static_lanes[0].lane_id == "road_1:section_0:lane_1"
+    assert local_map.perceived_lanes
+    assert local_map.perceived_lanes[0].source_modality == "camera"
     assert local_map.temporary_boundaries
     assert local_map.closed_lanes == []
     assert local_map.traffic_signal_states
@@ -214,6 +216,43 @@ def test_mapping_module_ignores_cones_for_lane_closure() -> None:
         ego_pose=ego_pose,
     )
     assert local_map.closed_lanes == []
+
+
+def test_mapping_module_publishes_perceived_lanes_without_lane_graph() -> None:
+    mapping = MapAwareMappingModule(lane_graph_provider=None)
+    ego_pose = EgoPose(
+        world_xyz=np.array([5.0, 0.0, 0.0], dtype=np.float32),
+        yaw_rad=0.0,
+        speed_mps=8.0,
+        acceleration_mps2=0.0,
+        current_lane_id="lane_001",
+        frenet_s=5.0,
+        frenet_d=0.0,
+        heading_error_rad=0.0,
+    )
+    perceived_lane = LaneLine(
+        lane_id="lane_left",
+        polyline_image=np.array([[10.0, 10.0], [15.0, 20.0]], dtype=np.float32),
+        polyline_world=np.array([[5.0, -1.5, 0.0], [15.0, -1.2, 0.0]], dtype=np.float32),
+        line_type=LaneLineType.SOLID,
+        confidence=0.8,
+        source_modality="camera",
+        source_sensor_ids=["front_camera"],
+        position_estimate_kind="camera_projection",
+    )
+    local_map = mapping.run(
+        detections=[],
+        lanes=[perceived_lane],
+        drivable_space=DrivableSpaceMask(
+            mask=np.ones((8, 8), dtype=bool),
+            class_probabilities=np.ones((8, 8), dtype=np.float32),
+            source_sensor_id="front_camera",
+        ),
+        cones=[],
+        traffic_lights=[],
+        ego_pose=ego_pose,
+    )
+    assert local_map.perceived_lanes == [perceived_lane]
 
 
 def test_lane_aware_prediction_follows_lane_centerline() -> None:

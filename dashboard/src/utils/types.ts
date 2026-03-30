@@ -24,9 +24,17 @@ export interface ObjectDetection {
 
 export interface LaneLine {
   lane_id: string;
+  polyline_image?: number[][];
   polyline_world: number[][];
-  lane_type: string;
+  line_type: string;
   confidence: number;
+  source_modality: "camera" | "lidar" | "fused" | "bootstrap";
+  source_sensor_ids: string[];
+  position_estimate_kind:
+    | "camera_projection"
+    | "lidar_projection"
+    | "fusion"
+    | "truth_fallback";
 }
 
 export interface TrafficLightDetection {
@@ -88,6 +96,7 @@ export interface LocalMap {
   temporary_boundaries: LaneLine[];
   closed_lanes: string[];
   traffic_signal_states: TrafficLightDetection[];
+  perceived_lanes: LaneLine[];
 }
 
 export interface ScenarioInfo {

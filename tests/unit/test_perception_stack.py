@@ -152,7 +152,7 @@ def test_perception_stack_converts_bootstrap_annotations() -> None:
     assert detections[0].image_bbox_xyxy is not None
     assert detections[0].source_modality == "bootstrap"
     assert detections[0].position_estimate_kind == "truth_fallback"
-    assert lanes
+    assert isinstance(lanes, list)
     assert drivable.mask.shape == (120, 200)
     assert len(traffic_lights) == 1
     assert traffic_lights[0].source_modality == "bootstrap"
@@ -305,7 +305,7 @@ def test_lidar_perception_stack_extracts_clusters() -> None:
     assert all(detection.source_modality == "lidar" for detection in detections)
     assert all(detection.position_estimate_kind == "lidar_cluster" for detection in detections)
     assert cones == []
-    assert lanes
+    assert isinstance(lanes, list)
     assert drivable.mask.shape == (120, 200)
     assert traffic_lights == []
     assert bundle.metadata["perception_summary"].fallback_state == "lidar_only"
@@ -446,6 +446,82 @@ def test_fuse_detections_drops_conflicting_unmatched_classes() -> None:
     assert fused == []
 
 
+def test_fused_perception_stack_publishes_camera_only_detections_when_no_fused_match() -> None:
+    module = FusedPerceptionStack(device="cpu", model_variant="bootstrap")
+    camera_detection = _object_detection(
+        track_id=31,
+        object_class=ObjectClass.VEHICLE,
+        center_x=10.0,
+        center_y=0.0,
+        confidence=0.3,
+        source_modality="camera",
+    )
+    lidar_detection = _object_detection(
+        track_id=41,
+        object_class=ObjectClass.VEHICLE,
+        center_x=24.0,
+        center_y=0.0,
+        confidence=0.9,
+        source_modality="lidar",
+    )
+    module.camera_stack.detect_dynamic = lambda bundle: (  # type: ignore[method-assign]
+        [camera_detection],
+        [],
+        "camera_only",
+        ["front_camera"],
+        {"front_camera": []},
+    )
+    module.lidar_stack.detect_dynamic = lambda bundle: [lidar_detection]  # type: ignore[method-assign]
+
+    detections, _, _, traffic_lights, _ = module.run(_bundle())
+
+    assert len(detections) == 1
+    assert detections[0].source_modality == "camera"
+    assert detections[0].track_id == 31
+    assert traffic_lights == []
+
+
+def test_fused_perception_stack_keeps_unmatched_camera_objects_alongside_fused_matches() -> None:
+    module = FusedPerceptionStack(device="cpu", model_variant="bootstrap")
+    fused_camera_detection = _object_detection(
+        track_id=50,
+        object_class=ObjectClass.VEHICLE,
+        center_x=12.0,
+        center_y=0.0,
+        confidence=0.9,
+        source_modality="camera",
+    )
+    unmatched_camera_detection = _object_detection(
+        track_id=51,
+        object_class=ObjectClass.VEHICLE,
+        center_x=24.0,
+        center_y=0.0,
+        confidence=0.4,
+        source_modality="camera",
+    )
+    lidar_detection = _object_detection(
+        track_id=60,
+        object_class=ObjectClass.VEHICLE,
+        center_x=12.5,
+        center_y=0.2,
+        confidence=0.8,
+        source_modality="lidar",
+    )
+    module.camera_stack.detect_dynamic = lambda bundle: (  # type: ignore[method-assign]
+        [fused_camera_detection, unmatched_camera_detection],
+        [],
+        "camera_only",
+        ["front_camera"],
+        {"front_camera": []},
+    )
+    module.lidar_stack.detect_dynamic = lambda bundle: [lidar_detection]  # type: ignore[method-assign]
+
+    detections, _, _, _, _ = module.run(_bundle())
+
+    assert len(detections) == 2
+    assert {detection.source_modality for detection in detections} == {"fused", "camera"}
+
+
 def test_mapping_consumes_perception_outputs() -> None:
     module = PerceptionStack(device="cpu", model_variant="bootstrap")
     detections, lanes, drivable, traffic_lights, cones = module.run(_bundle())
@@ -454,6 +530,7 @@ def test_mapping_consumes_perception_outputs() -> None:
         (),
         {
             "current_lane_id": "lane_001",
+            "world_xyz": np.array([0.0, 0.0, 0.0], dtype=np.float32),
         },
     )()
     local_map = StubMappingModule().run(detections, lanes, drivable, cones, traffic_lights, ego_pose)

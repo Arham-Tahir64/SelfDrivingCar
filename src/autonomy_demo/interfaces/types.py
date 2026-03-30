@@ -145,10 +145,14 @@ class LaneLine:
     polyline_world: FloatArray
     line_type: LaneLineType
     confidence: float
+    source_modality: str = "camera"
+    source_sensor_ids: list[str] = field(default_factory=list)
+    position_estimate_kind: str = "camera_projection"
 
     def __post_init__(self) -> None:
         self.polyline_image = _float_array(self.polyline_image)
         self.polyline_world = _float_array(self.polyline_world)
+        self.source_sensor_ids = list(self.source_sensor_ids)
         if self.polyline_image.ndim != 2 or self.polyline_image.shape[1] != 2:
             raise ValueError("polyline_image must be Nx2")
         if self.polyline_world.ndim != 2 or self.polyline_world.shape[1] != 3:
@@ -271,6 +275,7 @@ class LocalMap:
     temporary_boundaries: list[LaneLine]
     closed_lanes: list[str]
     traffic_signal_states: list[TrafficLightDetection]
+    perceived_lanes: list[LaneLine] = field(default_factory=list)
     drivable_space: DrivableSpaceMask | None = None
 
 

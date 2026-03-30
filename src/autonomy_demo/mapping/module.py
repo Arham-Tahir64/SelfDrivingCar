@@ -68,6 +68,7 @@ class MapAwareMappingModule:
             temporary_boundaries=temporary_boundaries,
             closed_lanes=closed_lanes,
             traffic_signal_states=traffic_lights,
+            perceived_lanes=list(lanes),
             drivable_space=drivable_space,
         )
 

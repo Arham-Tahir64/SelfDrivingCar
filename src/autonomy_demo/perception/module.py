@@ -150,6 +150,9 @@ class StubPerceptionModule:
             polyline_world=np.array([[0, 50, 0], [10, 50, 0], [20, 50, 0]], dtype=np.float32),
             line_type=LaneLineType.SOLID,
             confidence=0.9,
+            source_modality="bootstrap",
+            source_sensor_ids=["front_camera"],
+            position_estimate_kind="truth_fallback",
         )
         drivable = DrivableSpaceMask(
             mask=np.ones((32, 32), dtype=np.bool_),
@@ -177,7 +180,12 @@ class _CameraSceneContextMixin:
         lane_extractor: LaneExtractor,
         drivable_extractor: DrivableSpaceExtractor,
     ) -> tuple[list[LaneLine], DrivableSpaceMask]:
-        lanes = lane_extractor.extract(bundle.front_camera.frame)
+        lanes = lane_extractor.extract(
+            bundle.front_camera.frame,
+            sensor_id=bundle.front_camera.sensor_id,
+            ego_world_xyz=np.asarray(bundle.gnss.world_xyz, dtype=np.float32),
+            ego_yaw_rad=float(bundle.metadata.get("ego_yaw_rad", 0.0)),
+        )
         drivable_space = drivable_extractor.extract(
             bundle.front_camera.frame,
             bundle.front_camera.sensor_id,
@@ -509,6 +517,7 @@ class FusedPerceptionStack(_CameraSceneContextMixin):
             )
             lidar_detections = self.lidar_stack.detect_dynamic(bundle)
             fused_objects = fuse_detections(camera_detections, lidar_detections)
+            canonical_objects = self._canonical_detections(camera_detections, fused_objects)
             lanes, drivable_space = self._scene_context(
                 bundle,
                 lane_extractor=self.lane_extractor,
@@ -517,29 +526,69 @@ class FusedPerceptionStack(_CameraSceneContextMixin):
             status_summary = _build_perception_status(
                     active_mode="fused_v1",
                     fallback_state=self._fused_fallback_state(
-                        detections=fused_objects,
+                        detections=canonical_objects,
                         camera_fallback_state=camera_fallback_state,
                     ),
-                    detections=fused_objects,
+                    detections=canonical_objects,
                     traffic_lights=traffic_lights,
                     active_camera_sensors=active_camera_sensors,
                 )
             _record_perception_metadata(
                 bundle,
-                detections=fused_objects,
+                detections=canonical_objects,
                 lanes=lanes,
                 drivable_space=drivable_space,
                 traffic_lights=traffic_lights,
                 status_summary=status_summary,
             )
             bundle.metadata["perception_camera_detections"] = camera_detection_debug
-            return fused_objects, lanes, drivable_space, traffic_lights, []
+            return canonical_objects, lanes, drivable_space, traffic_lights, []
         except Exception as exc:
             bundle.metadata["perception_status"] = "degraded"
             bundle.metadata["perception_error"] = str(exc)
             bundle.metadata["perception_camera_detections"] = {}
             self.logger.warning("Fused perception degraded for tick %s: %s", bundle.tick_id, exc)
             return _empty_outputs(bundle)
+
+    def _canonical_detections(
+        self,
+        camera_detections: list[ObjectDetection],
+        fused_detections: list[ObjectDetection],
+    ) -> list[ObjectDetection]:
+        actual_camera_detections = [
+            detection for detection in camera_detections if str(detection.source_modality) == "camera"
+        ]
+        if not fused_detections:
+            return actual_camera_detections
+        canonical = list(fused_detections)
+        for detection in actual_camera_detections:
+            if any(self._camera_detection_is_represented(detection, fused) for fused in fused_detections):
+                continue
+            canonical.append(detection)
+        return canonical
+
+    def _camera_detection_is_represented(
+        self,
+        camera_detection: ObjectDetection,
+        fused_detection: ObjectDetection,
+        *,
+        match_distance_m: float = 5.0,
+    ) -> bool:
+        if not self._class_compatible(camera_detection, fused_detection):
+            return False
+        camera_center = np.mean(np.asarray(camera_detection.world_bbox_3d, dtype=np.float32), axis=0)
+        fused_center = np.mean(np.asarray(fused_detection.world_bbox_3d, dtype=np.float32), axis=0)
+        return float(np.linalg.norm(camera_center[:2] - fused_center[:2])) <= match_distance_m
+
+    def _class_compatible(
+        self,
+        first: ObjectDetection,
+        second: ObjectDetection,
+    ) -> bool:
+        if first.object_class == second.object_class:
+            return True
+        soft_pair = {"pedestrian", "cyclist"}
+        return first.object_class.value in soft_pair and second.object_class.value in soft_pair
 
     def _fused_fallback_state(
         self,
@@ -550,8 +599,8 @@ class FusedPerceptionStack(_CameraSceneContextMixin):
         modalities = {detection.source_modality for detection in detections}
         if "fused" in modalities:
             return "fused"
-        if "lidar" in modalities:
-            return "lidar_only"
+        if "camera" in modalities:
+            return "camera_only"
         if camera_fallback_state == "bootstrap":
             return "bootstrap"
         return "camera_only"

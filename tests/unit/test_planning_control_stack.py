@@ -9,6 +9,8 @@ from autonomy_demo.interfaces.types import (
     EgoPose,
     LocalMap,
     ObjectDetection,
+    RoutePlan,
+    RouteWaypoint,
     StaticLaneSegment,
     TrafficLightDetection,
     Waypoint,
@@ -49,7 +51,15 @@ def _ego_pose() -> EgoPose:
     )
 
 
-def _lead_detection(x: float, y: float = 0.0, speed: float = 1.0) -> ObjectDetection:
+def _lead_detection(
+    x: float,
+    y: float = 0.0,
+    speed: float = 1.0,
+    *,
+    confidence: float = 0.95,
+    source_modality: str = "bootstrap",
+    track_state: TrackState = TrackState.CONFIRMED,
+) -> ObjectDetection:
     return ObjectDetection(
         track_id=7,
         object_class=ObjectClass.VEHICLE,
@@ -67,8 +77,9 @@ def _lead_detection(x: float, y: float = 0.0, speed: float = 1.0) -> ObjectDetec
             dtype=np.float32,
         ),
         velocity=np.array([speed, 0.0, 0.0], dtype=np.float32),
-        confidence=0.95,
-        track_state=TrackState.CONFIRMED,
+        confidence=confidence,
+        track_state=track_state,
+        source_modality=source_modality,
     )
 
 
@@ -192,6 +203,36 @@ def test_frenet_motion_planner_prefers_safe_lane_keep_and_can_merge() -> None:
     assert merge_trajectory.waypoints[-1].y > 1.0
 
 
+def test_frenet_motion_planner_prefers_route_guidance_for_non_merge_driving() -> None:
+    planner = FrenetMotionPlanner(horizon_steps=6, dt_s=0.2, cruise_speed_mps=10.0)
+    route_plan = RoutePlan(
+        waypoints=[
+            RouteWaypoint(x=0.0, y=0.0, z=0.0, yaw=0.0, cumulative_distance_m=0.0, target_speed_mps=10.0),
+            RouteWaypoint(x=5.0, y=0.0, z=0.0, yaw=0.0, cumulative_distance_m=5.0, target_speed_mps=10.0),
+            RouteWaypoint(x=10.0, y=0.0, z=0.0, yaw=0.0, cumulative_distance_m=10.0, target_speed_mps=10.0),
+            RouteWaypoint(x=15.0, y=0.0, z=0.0, yaw=0.0, cumulative_distance_m=15.0, target_speed_mps=10.0),
+        ],
+        goal_xyz=np.array([15.0, 0.0, 0.0], dtype=np.float32),
+        total_distance_m=15.0,
+        goal_tolerance_m=2.0,
+    )
+    planner.route_plan = route_plan
+    planner._fallback.route_plan = route_plan
+    local_map = LocalMap(
+        static_lanes=[_lane("road_1:section_0:lane_1", 3.5)],
+        dynamic_agents=[],
+        cone_instances=[],
+        temporary_boundaries=[],
+        closed_lanes=[],
+        traffic_signal_states=[],
+        drivable_space=None,
+    )
+    ego_pose = _ego_pose()
+    lane_keep_trajectory = planner.run(local_map, ego_pose, [], BehaviorState.LANE_KEEP)
+    assert lane_keep_trajectory.waypoints
+    assert abs(lane_keep_trajectory.waypoints[0].y) < 0.5
+
+
 def test_controller_emergency_override_triggers_for_close_lead_prediction() -> None:
     controller = RouteFollowerController()
     local_map = LocalMap(
@@ -254,3 +295,35 @@ def test_controller_ignores_oversized_false_positive_detection_for_emergency_ove
     command = controller.run(trajectory, _ego_pose())
     assert command.emergency_override is False
     assert command.brake < 0.9
+
+
+def test_controller_emergency_override_accepts_tentative_camera_detection_with_lower_confidence() -> None:
+    controller = RouteFollowerController()
+    local_map = LocalMap(
+        static_lanes=[_lane("road_1:section_0:lane_1", 0.0)],
+        dynamic_agents=[
+            _lead_detection(
+                5.0,
+                0.0,
+                speed=0.0,
+                confidence=0.3,
+                source_modality="camera",
+                track_state=TrackState.TENTATIVE,
+            )
+        ],
+        cone_instances=[],
+        temporary_boundaries=[],
+        closed_lanes=[],
+        traffic_signal_states=[],
+        drivable_space=None,
+    )
+    controller.set_context(local_map, [])
+    trajectory = FrenetMotionPlanner(horizon_steps=4, dt_s=0.2, cruise_speed_mps=8.0).run(
+        local_map,
+        _ego_pose(),
+        [],
+        BehaviorState.LANE_KEEP,
+    )
+    command = controller.run(trajectory, _ego_pose())
+    assert command.emergency_override is True
+    assert command.brake >= 0.9

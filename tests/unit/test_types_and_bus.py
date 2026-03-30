@@ -1,7 +1,7 @@
 import numpy as np
 
-from autonomy_demo.interfaces.enums import BehaviorState, TrackState
-from autonomy_demo.interfaces.types import CameraFrame, ObjectDetection, PerceptionStatus
+from autonomy_demo.interfaces.enums import BehaviorState, LaneLineType, TrackState
+from autonomy_demo.interfaces.types import CameraFrame, LaneLine, ObjectDetection, PerceptionStatus
 from autonomy_demo.common.serialization import serialize
 from autonomy_demo.orchestration.event_bus import InProcessEventBus
 
@@ -60,3 +60,20 @@ def test_serialization_preserves_perception_provenance_fields() -> None:
     assert payload["perception/detections"][0]["source_sensor_ids"] == ["front_camera", "lidar"]
     assert payload["perception/detections"][0]["position_estimate_kind"] == "fusion"
     assert payload["perception/status"]["fallback_state"] == "fused"
+
+
+def test_serialization_preserves_lane_provenance_fields() -> None:
+    lane = LaneLine(
+        lane_id="lane_left",
+        polyline_image=np.array([[10.0, 10.0], [12.0, 20.0]], dtype=np.float32),
+        polyline_world=np.array([[5.0, -1.5, 0.0], [15.0, -1.2, 0.0]], dtype=np.float32),
+        line_type=LaneLineType.SOLID,
+        confidence=0.8,
+        source_modality="camera",
+        source_sensor_ids=["front_camera"],
+        position_estimate_kind="camera_projection",
+    )
+    payload = serialize({"perception/lanes": [lane]})
+    assert payload["perception/lanes"][0]["source_modality"] == "camera"
+    assert payload["perception/lanes"][0]["source_sensor_ids"] == ["front_camera"]
+    assert payload["perception/lanes"][0]["position_estimate_kind"] == "camera_projection"
