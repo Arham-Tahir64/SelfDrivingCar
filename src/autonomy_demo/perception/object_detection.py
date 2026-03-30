@@ -80,8 +80,15 @@ def _pseudo_world_box(
     bbox_height = max(float(bbox_xyxy[3] - bbox_xyxy[1]), 1.0)
     center_x = float((bbox_xyxy[0] + bbox_xyxy[2]) * 0.5)
     normalized_x = ((center_x / max(image_width, 1)) - 0.5) * 2.0
-    forward_distance = float(np.clip(1200.0 / bbox_height, 4.0, 60.0))
-    lateral_offset = float(normalized_x * forward_distance * 0.8)
+    forward_scale = 1200.0
+    lateral_scale = 0.8
+    if sensor_id == "front_camera" and object_class == ObjectClass.VEHICLE:
+        # Front-camera lead vehicles should appear conservative and lane-centered enough
+        # for downstream braking to react before the final few meters.
+        forward_scale = 650.0
+        lateral_scale = 0.35
+    forward_distance = float(np.clip(forward_scale / bbox_height, 3.0, 45.0))
+    lateral_offset = float(normalized_x * forward_distance * lateral_scale)
     size_map = {
         ObjectClass.VEHICLE: (4.5, 2.0, 1.6),
         ObjectClass.CYCLIST: (1.8, 0.8, 1.5),

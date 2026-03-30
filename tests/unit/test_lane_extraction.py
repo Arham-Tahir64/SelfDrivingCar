@@ -67,3 +67,25 @@ def test_lane_extractor_produces_parallel_world_boundaries() -> None:
     separation = np.asarray(left_lane.polyline_world[:, 1] - right_lane.polyline_world[:, 1], dtype=np.float32)
     assert float(np.std(separation)) < 0.5
     assert float(np.mean(np.abs(separation))) > 2.0
+
+
+def test_lane_extractor_recovers_missing_boundary_from_previous_pair() -> None:
+    extractor = LaneExtractor()
+    first_lanes = extractor.extract(
+        _lane_frame(),
+        sensor_id="front_camera",
+        ego_world_xyz=np.zeros(3, dtype=np.float32),
+        ego_yaw_rad=0.0,
+    )
+    assert len(first_lanes) == 2
+
+    image = np.zeros((360, 640, 3), dtype=np.uint8)
+    cv2 = pytest.importorskip("cv2")
+    cv2.line(image, (130, 350), (250, 170), (255, 255, 255), 8)
+    recovered_lanes = extractor.extract(
+        image,
+        sensor_id="front_camera",
+        ego_world_xyz=np.zeros(3, dtype=np.float32),
+        ego_yaw_rad=0.0,
+    )
+    assert len(recovered_lanes) == 2

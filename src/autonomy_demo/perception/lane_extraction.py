@@ -61,8 +61,9 @@ def _image_to_world_polyline(
 class LaneExtractor:
     """Camera-first lane detector with simple image-space fitting and temporal smoothing."""
 
-    def __init__(self, *, smoothing_alpha: float = 0.7) -> None:
+    def __init__(self, *, smoothing_alpha: float = 0.7, default_lane_width_px_ratio: float = 0.24) -> None:
         self.smoothing_alpha = smoothing_alpha
+        self.default_lane_width_px_ratio = default_lane_width_px_ratio
         self._previous_polylines: dict[str, np.ndarray] = {}
 
     def extract(
@@ -79,6 +80,7 @@ class LaneExtractor:
         image_height, image_width = image.shape[:2]
         left_lane, right_lane = self._extract_with_opencv(image)
         left_lane, right_lane = self._sanitize_lane_pair(left_lane, right_lane, image_width)
+        left_lane, right_lane = self._recover_lane_pair(left_lane, right_lane, image_width)
         detected = [("lane_left", left_lane), ("lane_right", right_lane)]
         lanes: list[LaneLine] = []
         ego_xyz = np.asarray(
@@ -112,6 +114,29 @@ class LaneExtractor:
         if len(lanes) >= 2:
             lanes = self._stabilize_lane_pair(lanes, ego_xyz, ego_yaw_rad, sensor_id=sensor_id, image_shape=image.shape)
         return lanes
+
+    def _recover_lane_pair(
+        self,
+        left_lane: np.ndarray | None,
+        right_lane: np.ndarray | None,
+        image_width: int,
+    ) -> tuple[np.ndarray | None, np.ndarray | None]:
+        default_offset_px = max(48.0, float(image_width) * self.default_lane_width_px_ratio)
+        previous_left = self._previous_polylines.get("lane_left_stabilized")
+        previous_right = self._previous_polylines.get("lane_right_stabilized")
+        if left_lane is None and right_lane is None:
+            if previous_left is not None and previous_right is not None:
+                return previous_left.copy(), previous_right.copy()
+            return None, None
+        if left_lane is None and right_lane is not None:
+            inferred_left = right_lane.copy()
+            inferred_left[:, 0] -= default_offset_px
+            return inferred_left.astype(np.float32), right_lane
+        if right_lane is None and left_lane is not None:
+            inferred_right = left_lane.copy()
+            inferred_right[:, 0] += default_offset_px
+            return left_lane, inferred_right.astype(np.float32)
+        return left_lane, right_lane
 
     def _stabilize_lane_pair(
         self,
@@ -245,7 +270,7 @@ class LaneExtractor:
         )
         cv2.fillPoly(mask, polygon, 255)
         cropped = cv2.bitwise_and(blurred, mask)
-        _, binary = cv2.threshold(cropped, 160, 255, cv2.THRESH_BINARY)
+        _, binary = cv2.threshold(cropped, 145, 255, cv2.THRESH_BINARY)
         return binary
 
     def _extract_with_sliding_windows(self, binary: np.ndarray) -> tuple[np.ndarray | None, np.ndarray | None]:

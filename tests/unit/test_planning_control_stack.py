@@ -79,7 +79,9 @@ def _lead_detection(
         velocity=np.array([speed, 0.0, 0.0], dtype=np.float32),
         confidence=confidence,
         track_state=track_state,
+        image_bbox_xyxy=np.array([430.0, 210.0, 550.0, 360.0], dtype=np.float32),
         source_modality=source_modality,
+        source_sensor_ids=["front_camera"] if source_modality in {"camera", "fused"} else [],
     )
 
 
@@ -309,6 +311,102 @@ def test_controller_emergency_override_accepts_tentative_camera_detection_with_l
                 confidence=0.3,
                 source_modality="camera",
                 track_state=TrackState.TENTATIVE,
+            )
+        ],
+        cone_instances=[],
+        temporary_boundaries=[],
+        closed_lanes=[],
+        traffic_signal_states=[],
+        drivable_space=None,
+    )
+    controller.set_context(local_map, [])
+    trajectory = FrenetMotionPlanner(horizon_steps=4, dt_s=0.2, cruise_speed_mps=8.0).run(
+        local_map,
+        _ego_pose(),
+        [],
+        BehaviorState.LANE_KEEP,
+    )
+    command = controller.run(trajectory, _ego_pose())
+    assert command.emergency_override is True
+    assert command.brake >= 0.9
+
+
+def test_controller_emergency_override_uses_front_camera_image_hazard_when_world_gap_is_weak() -> None:
+    controller = RouteFollowerController()
+    local_map = LocalMap(
+        static_lanes=[_lane("road_1:section_0:lane_1", 0.0)],
+        dynamic_agents=[
+            ObjectDetection(
+                track_id=12,
+                object_class=ObjectClass.VEHICLE,
+                world_bbox_3d=np.array(
+                    [
+                        [18.0, 4.0, 0.0],
+                        [20.0, 4.0, 0.0],
+                        [20.0, 5.0, 0.0],
+                        [18.0, 5.0, 0.0],
+                        [18.0, 4.0, 1.5],
+                        [20.0, 4.0, 1.5],
+                        [20.0, 5.0, 1.5],
+                        [18.0, 5.0, 1.5],
+                    ],
+                    dtype=np.float32,
+                ),
+                velocity=np.zeros(3, dtype=np.float32),
+                confidence=0.35,
+                track_state=TrackState.TENTATIVE,
+                image_bbox_xyxy=np.array([420.0, 220.0, 560.0, 430.0], dtype=np.float32),
+                source_modality="camera",
+                source_sensor_ids=["front_camera"],
+                position_estimate_kind="camera_projection",
+            )
+        ],
+        cone_instances=[],
+        temporary_boundaries=[],
+        closed_lanes=[],
+        traffic_signal_states=[],
+        drivable_space=None,
+    )
+    controller.set_context(local_map, [])
+    trajectory = FrenetMotionPlanner(horizon_steps=4, dt_s=0.2, cruise_speed_mps=8.0).run(
+        local_map,
+        _ego_pose(),
+        [],
+        BehaviorState.LANE_KEEP,
+    )
+    command = controller.run(trajectory, _ego_pose())
+    assert command.emergency_override is True
+    assert command.brake >= 0.9
+
+
+def test_controller_emergency_override_brakes_for_small_front_camera_vehicle_box() -> None:
+    controller = RouteFollowerController()
+    local_map = LocalMap(
+        static_lanes=[_lane("road_1:section_0:lane_1", 0.0)],
+        dynamic_agents=[
+            ObjectDetection(
+                track_id=13,
+                object_class=ObjectClass.VEHICLE,
+                world_bbox_3d=np.array(
+                    [
+                        [22.0, 2.5, 0.0],
+                        [24.0, 2.5, 0.0],
+                        [24.0, 3.5, 0.0],
+                        [22.0, 3.5, 0.0],
+                        [22.0, 2.5, 1.5],
+                        [24.0, 2.5, 1.5],
+                        [24.0, 3.5, 1.5],
+                        [22.0, 3.5, 1.5],
+                    ],
+                    dtype=np.float32,
+                ),
+                velocity=np.zeros(3, dtype=np.float32),
+                confidence=0.28,
+                track_state=TrackState.TENTATIVE,
+                image_bbox_xyxy=np.array([452.0, 240.0, 540.0, 268.0], dtype=np.float32),
+                source_modality="camera",
+                source_sensor_ids=["front_camera"],
+                position_estimate_kind="camera_projection",
             )
         ],
         cone_instances=[],

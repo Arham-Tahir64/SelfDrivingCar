@@ -148,6 +148,9 @@ class RouteFollowerController:
             detections_by_track = {
                 int(agent.track_id): agent for agent in self._latest_local_map.dynamic_agents
             }
+        image_detection_risk = self._front_camera_image_risk(ego_pose, current_detections)
+        if image_detection_risk is not None:
+            return image_detection_risk
         direct_detection_risk = self._direct_vehicle_risk(
             ego_pose,
             current_lane=current_lane,
@@ -205,6 +208,50 @@ class RouteFollowerController:
             ttc_s = longitudinal_gap / closing_speed
             if best is None or longitudinal_gap < best[0]:
                 best = (float(longitudinal_gap), float(ttc_s))
+        return best
+
+    def _front_camera_image_risk(
+        self,
+        ego_pose: EgoPose,
+        detections: list[object],
+    ) -> tuple[float, float] | None:
+        best: tuple[float, float] | None = None
+        for detection in detections:
+            detection_class = getattr(detection, "object_class", None)
+            if detection_class is None:
+                continue
+            object_class = getattr(detection_class, "value", str(detection_class))
+            if object_class != "vehicle":
+                continue
+            if "front_camera" not in list(getattr(detection, "source_sensor_ids", [])):
+                continue
+            image_bbox = getattr(detection, "image_bbox_xyxy", None)
+            if image_bbox is None:
+                continue
+            bbox = np.asarray(image_bbox, dtype=np.float32)
+            if bbox.shape != (4,):
+                continue
+            bbox_width = float(max(bbox[2] - bbox[0], 1.0))
+            bbox_height = float(max(bbox[3] - bbox[1], 1.0))
+            bbox_bottom = float(bbox[3])
+            bbox_center_x = float((bbox[0] + bbox[2]) * 0.5)
+            confidence = float(getattr(detection, "confidence", 0.0))
+            if confidence < 0.15:
+                continue
+            if bbox_height < 16.0 or bbox_width < 14.0:
+                continue
+            # Approximate front-camera frame center for current configs (works for 960/1280 width class).
+            if abs(bbox_center_x - 480.0) > 280.0 and abs(bbox_center_x - 640.0) > 340.0:
+                continue
+            if bbox_bottom < 110.0:
+                continue
+            estimated_gap_m = float(np.clip((650.0 / bbox_height) - 1.5, 2.0, 24.0))
+            if bbox_height >= 18.0 and bbox_width >= 18.0 and bbox_bottom >= 120.0:
+                estimated_gap_m = min(estimated_gap_m, 9.0)
+            closing_speed = max(float(ego_pose.speed_mps), 0.1)
+            ttc_s = estimated_gap_m / closing_speed
+            if best is None or estimated_gap_m < best[0]:
+                best = (estimated_gap_m, ttc_s)
         return best
 
     def _direct_vehicle_risk(
