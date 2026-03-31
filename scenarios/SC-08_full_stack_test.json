@@ -1,0 +1,42 @@
+{
+  "scenario_id": "SC-08",
+  "name": "Full Stack Test — Tracking, Learned Perception, Prediction",
+  "map": "Town04",
+  "ego_spawn": { "x": 50.0, "y": -10.0, "yaw": 0.0 },
+  "ego_goal": { "x": 400.0, "y": -10.0 },
+  "max_duration_s": 90,
+  "npcs": [
+    {
+      "model": "vehicle.tesla.model3",
+      "behavior": "cruise",
+      "spawn": { "x": 80.0, "y": -10.0, "yaw": 0.0 },
+      "route": [{ "x": 420.0, "y": -10.0 }]
+    },
+    {
+      "model": "vehicle.lincoln.mkz_2020",
+      "behavior": "cruise",
+      "spawn": { "x": 120.0, "y": -6.5, "yaw": 0.0 },
+      "route": [{ "x": 420.0, "y": -6.5 }]
+    },
+    {
+      "model": "vehicle.audi.a2",
+      "behavior": "cruise",
+      "spawn": { "x": 200.0, "y": -10.0, "yaw": 0.0 },
+      "route": [{ "x": 420.0, "y": -10.0 }]
+    }
+  ],
+  "props": [
+    { "type": "trafficcone01", "x": 250.0, "y": -12.0 },
+    { "type": "trafficcone01", "x": 254.0, "y": -12.0 },
+    { "type": "trafficcone01", "x": 258.0, "y": -12.0 },
+    { "type": "trafficcone01", "x": 262.0, "y": -12.0 }
+  ],
+  "triggers": [
+    { "type": "lane_closure", "at_s": 150.0, "lane_id": 1 }
+  ],
+  "eval": {
+    "min_completion_rate": 0.80,
+    "max_collisions": 0,
+    "min_pedestrian_clearance_m": 2.0
+  }
+}

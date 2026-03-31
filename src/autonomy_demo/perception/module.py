@@ -32,6 +32,32 @@ from autonomy_demo.perception.object_detection import (
 )
 from autonomy_demo.perception.tracking import KalmanSortTracker, SimpleSortTracker
 
+# Lazy imports for learned perception (optional heavy dependencies)
+_segformer_cls = None
+_learned_lane_cls = None
+
+
+def _get_segformer_class():
+    global _segformer_cls
+    if _segformer_cls is None:
+        try:
+            from autonomy_demo.perception.segformer_drivable import SegFormerDrivableExtractor
+            _segformer_cls = SegFormerDrivableExtractor
+        except ImportError:
+            _segformer_cls = False  # type: ignore[assignment]
+    return _segformer_cls if _segformer_cls is not False else None
+
+
+def _get_learned_lane_class():
+    global _learned_lane_cls
+    if _learned_lane_cls is None:
+        try:
+            from autonomy_demo.perception.learned_lane_detection import LearnedLaneExtractor
+            _learned_lane_cls = LearnedLaneExtractor
+        except ImportError:
+            _learned_lane_cls = False  # type: ignore[assignment]
+    return _learned_lane_cls if _learned_lane_cls is not False else None
+
 
 def _count_by_modality(
     detections: list[ObjectDetection],
@@ -179,29 +205,81 @@ class _CameraSceneContextMixin:
         *,
         lane_extractor: LaneExtractor,
         drivable_extractor: DrivableSpaceExtractor,
+        learned_drivable_extractor=None,
+        learned_lane_extractor=None,
     ) -> tuple[list[LaneLine], DrivableSpaceMask]:
-        lanes = lane_extractor.extract(
+        ego_xyz = np.asarray(bundle.gnss.world_xyz, dtype=np.float32)
+        ego_yaw = float(bundle.metadata.get("ego_yaw_rad", 0.0))
+        ego_yaw_rate = float(bundle.imu.gyro_xyz[2])
+
+        # --- Drivable space: try learned model first, fall back to heuristic ---
+        drivable_space = None
+        if learned_drivable_extractor is not None:
+            drivable_space = learned_drivable_extractor.extract(
+                bundle.front_camera.frame,
+                bundle.front_camera.sensor_id,
+            )
+            if drivable_space is not None:
+                bundle.metadata["drivable_source"] = "segformer"
+                bundle.metadata["drivable_inference_ms"] = learned_drivable_extractor.last_inference_ms
+        if drivable_space is None:
+            drivable_space = drivable_extractor.extract(
+                bundle.front_camera.frame,
+                bundle.front_camera.sensor_id,
+            )
+            bundle.metadata.setdefault("drivable_source", "heuristic")
+
+        # --- Lanes: always run heuristic (for training data + fallback) ---
+        heuristic_lanes = lane_extractor.extract(
             bundle.front_camera.frame,
             sensor_id=bundle.front_camera.sensor_id,
-            ego_world_xyz=np.asarray(bundle.gnss.world_xyz, dtype=np.float32),
-            ego_yaw_rad=float(bundle.metadata.get("ego_yaw_rad", 0.0)),
-            ego_yaw_rate_rad_s=float(bundle.imu.gyro_xyz[2]),
+            ego_world_xyz=ego_xyz,
+            ego_yaw_rad=ego_yaw,
+            ego_yaw_rate_rad_s=ego_yaw_rate,
         )
-        drivable_space = drivable_extractor.extract(
-            bundle.front_camera.frame,
-            bundle.front_camera.sensor_id,
-        )
+
+        # Try learned lane detector; it uses heuristic output for self-supervised training
+        lanes = heuristic_lanes
+        if learned_lane_extractor is not None:
+            learned_lanes = learned_lane_extractor.extract(
+                bundle.front_camera.frame,
+                sensor_id=bundle.front_camera.sensor_id,
+                ego_world_xyz=ego_xyz,
+                ego_yaw_rad=ego_yaw,
+                ego_yaw_rate_rad_s=ego_yaw_rate,
+                heuristic_lanes=heuristic_lanes,
+            )
+            if learned_lanes is not None:
+                lanes = learned_lanes
+                bundle.metadata["lane_source"] = "learned"
+                bundle.metadata["lane_inference_ms"] = learned_lane_extractor.last_inference_ms
+            else:
+                bundle.metadata.setdefault("lane_source", "heuristic")
+                if hasattr(learned_lane_extractor, "is_trained"):
+                    bundle.metadata["lane_model_warmup"] = not learned_lane_extractor.is_trained
+        else:
+            bundle.metadata.setdefault("lane_source", "heuristic")
+
         return lanes, drivable_space
 
 
 class PerceptionStack(_CameraSceneContextMixin):
     """Camera-first perception v1 with YOLO-primary detections and explicit bootstrap fallback."""
 
-    def __init__(self, *, device: str, model_variant: str) -> None:
+    def __init__(self, *, device: str, model_variant: str, enable_learned_perception: bool = True) -> None:
         self.detector = YoloObjectDetector(model_variant=model_variant, device=device)
         self.tracker = KalmanSortTracker()
         self.lane_extractor = LaneExtractor()
         self.drivable_extractor = DrivableSpaceExtractor()
+        self.learned_drivable_extractor = None
+        self.learned_lane_extractor = None
+        if enable_learned_perception:
+            segformer_cls = _get_segformer_class()
+            if segformer_cls is not None:
+                self.learned_drivable_extractor = segformer_cls(device=device)
+            learned_lane_cls = _get_learned_lane_class()
+            if learned_lane_cls is not None:
+                self.learned_lane_extractor = learned_lane_cls(device=device)
         self.logger = get_logger(__name__, perception_mode="camera_v1")
         self._camera_order = ("front_camera", "left_camera", "right_camera", "rear_camera")
 
@@ -226,6 +304,8 @@ class PerceptionStack(_CameraSceneContextMixin):
                 bundle,
                 lane_extractor=self.lane_extractor,
                 drivable_extractor=self.drivable_extractor,
+                learned_drivable_extractor=self.learned_drivable_extractor,
+                learned_lane_extractor=self.learned_lane_extractor,
             )
             status_summary = _build_perception_status(
                 active_mode="camera_v1",
@@ -497,11 +577,13 @@ class LidarPerceptionStack(_CameraSceneContextMixin):
 class FusedPerceptionStack(_CameraSceneContextMixin):
     """Object-level camera/LiDAR fusion with camera lanes and LiDAR geometry preference."""
 
-    def __init__(self, *, device: str, model_variant: str) -> None:
-        self.camera_stack = PerceptionStack(device=device, model_variant=model_variant)
+    def __init__(self, *, device: str, model_variant: str, enable_learned_perception: bool = True) -> None:
+        self.camera_stack = PerceptionStack(device=device, model_variant=model_variant, enable_learned_perception=enable_learned_perception)
         self.lidar_stack = LidarPerceptionStack()
         self.lane_extractor = self.camera_stack.lane_extractor
         self.drivable_extractor = self.camera_stack.drivable_extractor
+        self.learned_drivable_extractor = self.camera_stack.learned_drivable_extractor
+        self.learned_lane_extractor = self.camera_stack.learned_lane_extractor
         self.logger = get_logger(__name__, perception_mode="fused_v1")
 
     def run(
@@ -524,6 +606,8 @@ class FusedPerceptionStack(_CameraSceneContextMixin):
                 bundle,
                 lane_extractor=self.lane_extractor,
                 drivable_extractor=self.drivable_extractor,
+                learned_drivable_extractor=self.learned_drivable_extractor,
+                learned_lane_extractor=self.learned_lane_extractor,
             )
             status_summary = _build_perception_status(
                     active_mode="fused_v1",
@@ -609,10 +693,12 @@ class FusedPerceptionStack(_CameraSceneContextMixin):
 
 
 def build_perception_module(runtime_config):
+    enable_learned = getattr(runtime_config, "enable_learned_perception", True)
     if runtime_config.perception_mode == "camera_v1":
         return PerceptionStack(
             device=runtime_config.perception_device,
             model_variant=runtime_config.perception_model_variant,
+            enable_learned_perception=enable_learned,
         )
     if runtime_config.perception_mode == "lidar_v1":
         return LidarPerceptionStack()
@@ -620,5 +706,6 @@ def build_perception_module(runtime_config):
         return FusedPerceptionStack(
             device=runtime_config.perception_device,
             model_variant=runtime_config.perception_model_variant,
+            enable_learned_perception=enable_learned,
         )
     return StubPerceptionModule()

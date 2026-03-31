@@ -423,3 +423,4 @@ class RuntimeConfig:
     latency_budget_ms: dict[str, float]
     ws_host: str = "0.0.0.0"
     ws_port: int = 8765
+    enable_learned_perception: bool = True

@@ -55,6 +55,7 @@ def load_runtime_config(app_config_path: Path) -> RuntimeConfig:
         },
         ws_host=str(visualization.get("ws_host", "0.0.0.0")),
         ws_port=int(visualization.get("ws_port", 8765)),
+        enable_learned_perception=bool(perception.get("enable_learned", True)),
     )
 
 

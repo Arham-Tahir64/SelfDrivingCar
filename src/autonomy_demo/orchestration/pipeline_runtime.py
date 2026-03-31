@@ -86,6 +86,11 @@ class PipelineRuntime:
                 detections, lanes, drivable_space, traffic_lights, _cones = self.perception.run(bundle)
                 t1 = _time_ms()
                 latency.record("perception", t1 - t0)
+                # Record learned perception sub-latencies if available
+                if "drivable_inference_ms" in bundle.metadata:
+                    latency.record("segformer_drivable", bundle.metadata["drivable_inference_ms"])
+                if "lane_inference_ms" in bundle.metadata:
+                    latency.record("learned_lanes", bundle.metadata["lane_inference_ms"])
 
                 bundle.metadata["debug_perception_detections"] = detections
                 if self.visualization and hasattr(self.visualization, "update_bundle"):
