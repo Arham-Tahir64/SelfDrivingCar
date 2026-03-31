@@ -31,7 +31,9 @@ def create_app(bridge: WebSocketBridge):
         try:
             while True:
                 await ws.receive_text()
-        except WebSocketDisconnect:
+        except Exception:
+            # Catch all disconnect/protocol errors, not just WebSocketDisconnect,
+            # so the finally block always runs cleanly.
             pass
         finally:
             bridge.unregister(ws)
@@ -63,7 +65,15 @@ def start_server_thread(
         bridge.set_event_loop(loop)
 
         app = create_app(bridge)
-        config = uvicorn.Config(app, host=host, port=port, log_level="warning", loop="asyncio")
+        config = uvicorn.Config(
+            app,
+            host=host,
+            port=port,
+            log_level="warning",
+            loop="asyncio",
+            ws_ping_interval=None,   # disable keepalive pings — prevents race with slow broadcasts
+            ws_ping_timeout=None,
+        )
         server = uvicorn.Server(config)
         loop.run_until_complete(server.serve())
 

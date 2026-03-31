@@ -159,8 +159,11 @@ class WebSocketBridge:
         stale: list[Any] = []
         for ws in self._clients:
             try:
-                await asyncio.wait_for(ws.send_text(text), timeout=1.0)
-            except (asyncio.TimeoutError, Exception):
+                await asyncio.wait_for(ws.send_text(text), timeout=5.0)
+            except asyncio.TimeoutError:
+                logger.warning("WebSocket send timed out; dropping client")
+                stale.append(ws)
+            except Exception:
                 stale.append(ws)
         for ws in stale:
             self._clients.discard(ws)
