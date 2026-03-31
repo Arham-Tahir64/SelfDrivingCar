@@ -493,3 +493,27 @@ def test_controller_comfort_zone_follow_does_not_apply_brake_at_crawl_speed() ->
     assert command.emergency_override is False
     assert command.brake == 0.0
     assert command.throttle > 0.0
+
+
+def test_controller_ignores_adjacent_lane_parked_vehicle_for_front_camera_risk() -> None:
+    controller = RouteFollowerController()
+    local_map = LocalMap(
+        static_lanes=[_lane("road_1:section_0:lane_1", 0.0), _lane("road_1:section_0:lane_2", 3.5)],
+        dynamic_agents=[_lead_detection(10.0, 3.5, speed=0.0, source_modality="camera")],
+        cone_instances=[],
+        temporary_boundaries=[],
+        closed_lanes=[],
+        traffic_signal_states=[],
+        drivable_space=None,
+    )
+    controller.set_context(local_map, [])
+    ego_pose = _ego_pose()
+    trajectory = FrenetMotionPlanner(horizon_steps=4, dt_s=0.2, cruise_speed_mps=8.0).run(
+        local_map,
+        ego_pose,
+        [],
+        BehaviorState.LANE_KEEP,
+    )
+    command = controller.run(trajectory, ego_pose)
+    assert command.emergency_override is False
+    assert command.brake < 0.05

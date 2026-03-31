@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find c:UsersArhamDesktopSelfDrivingCar -type f \\\\\\(-name *prd* -o -name *requirements* -o -name *README* \\\\\\))",
+      "Bash(find c:UsersArhamDesktopSelfDrivingCar -name *.github -o -name workflows -o -name Makefile -o -name pyproject.toml)",
+      "Bash(find c:UsersArhamDesktopSelfDrivingCar/tests -name *.py)"
+    ]
+  }
+}

@@ -9,7 +9,7 @@ import numpy as np
 
 from autonomy_demo.common.geometry import distance_xyz
 from autonomy_demo.common.logging import get_logger
-from autonomy_demo.eval.metrics import LatencyAccumulator
+from autonomy_demo.eval.metrics import LatencyAccumulator, MOTAccumulator
 from autonomy_demo.interfaces.enums import TopicName
 from autonomy_demo.interfaces.types import ControlCommand, DrivableSpaceMask, EgoPose, EgoTrajectory, EvaluationSummary, LaneLine, ObjectDetection, RoutePlan
 from autonomy_demo.planning.route_following import route_progress_distance
@@ -110,6 +110,7 @@ class LiveEvaluationHarness:
         self.red_light_stop_checks = 0
         self.red_light_stop_successes = 0
         self._latency: LatencyAccumulator | None = None
+        self._mot: MOTAccumulator = MOTAccumulator()
 
     def set_latency(self, latency: LatencyAccumulator) -> None:
         self._latency = latency
@@ -139,6 +140,10 @@ class LiveEvaluationHarness:
         }
         self.perception_ticks += 1
         self.detection_count_sum += len(detection_track_ids)
+        # MOT evaluation: compare tracker-assigned IDs against GT actor IDs
+        mot_detections = [d for d in detections if isinstance(d, ObjectDetection)]
+        if mot_detections:
+            self._mot.update(mot_detections)
         if detection_track_ids and self.previous_track_ids:
             overlap = len(detection_track_ids & self.previous_track_ids)
             self.track_continuity_sum += overlap / max(len(self.previous_track_ids), 1)
@@ -278,6 +283,11 @@ class LiveEvaluationHarness:
             f"Emergency override count: {self.emergency_override_count}",
             f"Red-light stop compliance: {red_light_stop_compliance:.2f}",
         ]
+        # MOT metrics
+        mot = self._mot.summary()
+        notes.append(f"MOT MOTA: {mot['mota']:.4f}")
+        notes.append(f"MOT MOTP: {mot['motp_m']:.4f} m")
+        notes.append(f"MOT TP={int(mot['true_positives'])} FP={int(mot['false_positives'])} FN={int(mot['false_negatives'])} IDSW={int(mot['id_switches'])}")
         self.final_summary = EvaluationSummary(
             scenario_id=self.scenario.scenario_id,
             success=success,

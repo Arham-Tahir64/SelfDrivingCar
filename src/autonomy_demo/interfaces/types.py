@@ -114,6 +114,7 @@ class ObjectDetection:
     source_modality: str = "bootstrap"
     source_sensor_ids: list[str] = field(default_factory=list)
     position_estimate_kind: str = "truth_fallback"
+    gt_actor_id: int | None = None  # CARLA actor ID for MOT evaluation
 
     def __post_init__(self) -> None:
         self.object_class = ObjectClass(self.object_class)
@@ -124,6 +125,11 @@ class ObjectDetection:
             self.image_bbox_xyxy = _float_array(self.image_bbox_xyxy, (4,))
         if not 0.0 <= self.confidence <= 1.0:
             raise ValueError("confidence must be within [0, 1]")
+
+    @property
+    def centroid_xyz(self) -> FloatArray:
+        """Centroid of the 3D bounding box (mean of 8 corners)."""
+        return np.mean(self.world_bbox_3d, axis=0).astype(np.float32)
 
 
 @dataclass(slots=True)

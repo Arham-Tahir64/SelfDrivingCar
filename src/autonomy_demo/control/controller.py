@@ -41,6 +41,7 @@ class RouteFollowerController:
         self.kd_speed = kd_speed
         self.emergency_ttc_s = emergency_ttc_s
         self.emergency_gap_m = emergency_gap_m
+        self.lead_lane_tolerance_m = 2.25
         self._integral_speed_error = 0.0
         self._previous_speed_error = 0.0
         self._latest_local_map: LocalMap | None = None
@@ -215,7 +216,12 @@ class RouteFollowerController:
             detections_by_track = {
                 int(agent.track_id): agent for agent in self._latest_local_map.dynamic_agents
             }
-        image_detection_risk = self._front_camera_image_risk(ego_pose, current_detections)
+        image_detection_risk = self._front_camera_image_risk(
+            ego_pose,
+            current_detections,
+            current_lane=current_lane,
+            ego_projection=ego_projection,
+        )
         if image_detection_risk is not None:
             return image_detection_risk
         direct_detection_risk = self._direct_vehicle_risk(
@@ -258,7 +264,7 @@ class RouteFollowerController:
                 projection = project_point_to_centerline(current_lane.centerline_world, np.mean(world_bbox, axis=0))
                 longitudinal_gap = float(projection.s - ego_projection.s)
                 lateral_gap = float(abs(projection.d))
-                if longitudinal_gap <= 0.0 or lateral_gap > 2.5:
+                if longitudinal_gap <= 0.0 or lateral_gap > self.lead_lane_tolerance_m:
                     continue
                 lead_speed = float(
                     np.linalg.norm(np.asarray(getattr(detection, "velocity", [0.0, 0.0]), dtype=np.float32)[:2])
@@ -281,6 +287,9 @@ class RouteFollowerController:
         self,
         ego_pose: EgoPose,
         detections: list[object],
+        *,
+        current_lane,
+        ego_projection,
     ) -> tuple[float, float] | None:
         best: tuple[float, float] | None = None
         for detection in detections:
@@ -305,6 +314,14 @@ class RouteFollowerController:
             confidence = float(getattr(detection, "confidence", 0.0))
             if confidence < 0.15:
                 continue
+            world_bbox = np.asarray(getattr(detection, "world_bbox_3d", np.zeros((8, 3), dtype=np.float32)), dtype=np.float32)
+            if world_bbox.shape == (8, 3) and current_lane is not None and ego_projection is not None:
+                center_xyz = np.mean(world_bbox, axis=0)
+                projection = project_point_to_centerline(current_lane.centerline_world, center_xyz)
+                longitudinal_gap = float(projection.s - ego_projection.s)
+                lateral_gap = float(abs(projection.d))
+                if longitudinal_gap <= 0.0 or lateral_gap > self.lead_lane_tolerance_m:
+                    continue
             if bbox_height < 16.0 or bbox_width < 14.0:
                 continue
             # Approximate front-camera frame center for current configs (works for 960/1280 width class).
@@ -374,7 +391,7 @@ class RouteFollowerController:
                 projection = project_point_to_centerline(current_lane.centerline_world, center_xyz)
                 longitudinal_gap = float(projection.s - ego_projection.s)
                 lateral_gap = float(abs(projection.d))
-                if longitudinal_gap <= 0.0 or lateral_gap > 3.5:
+                if longitudinal_gap <= 0.0 or lateral_gap > self.lead_lane_tolerance_m:
                     continue
             else:
                 delta = center_xyz[:2] - ego_xy

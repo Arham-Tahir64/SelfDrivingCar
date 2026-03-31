@@ -61,10 +61,20 @@ def _image_to_world_polyline(
 class LaneExtractor:
     """Camera-first lane detector with simple image-space fitting and temporal smoothing."""
 
-    def __init__(self, *, smoothing_alpha: float = 0.7, default_lane_width_px_ratio: float = 0.24) -> None:
+    def __init__(
+        self,
+        *,
+        smoothing_alpha: float = 0.7,
+        default_lane_width_px_ratio: float = 0.24,
+        turn_smoothing_disable_yaw_rate_rad_s: float = 0.20,
+        turn_smoothing_resume_yaw_rate_rad_s: float = 0.12,
+    ) -> None:
         self.smoothing_alpha = smoothing_alpha
         self.default_lane_width_px_ratio = default_lane_width_px_ratio
+        self.turn_smoothing_disable_yaw_rate_rad_s = turn_smoothing_disable_yaw_rate_rad_s
+        self.turn_smoothing_resume_yaw_rate_rad_s = turn_smoothing_resume_yaw_rate_rad_s
         self._previous_polylines: dict[str, np.ndarray] = {}
+        self._turn_smoothing_suppressed = False
 
     def extract(
         self,
@@ -73,14 +83,21 @@ class LaneExtractor:
         sensor_id: str = "front_camera",
         ego_world_xyz: np.ndarray | None = None,
         ego_yaw_rad: float = 0.0,
+        ego_yaw_rate_rad_s: float = 0.0,
     ) -> list[LaneLine]:
         image = np.asarray(frame, dtype=np.uint8)
         if image.ndim != 3:
             return []
         image_height, image_width = image.shape[:2]
+        suppress_temporal_smoothing = self._update_turn_smoothing_state(ego_yaw_rate_rad_s)
         left_lane, right_lane = self._extract_with_opencv(image)
         left_lane, right_lane = self._sanitize_lane_pair(left_lane, right_lane, image_width)
-        left_lane, right_lane = self._recover_lane_pair(left_lane, right_lane, image_width)
+        left_lane, right_lane = self._recover_lane_pair(
+            left_lane,
+            right_lane,
+            image_width,
+            allow_stale_pair_recovery=not suppress_temporal_smoothing,
+        )
         detected = [("lane_left", left_lane), ("lane_right", right_lane)]
         lanes: list[LaneLine] = []
         ego_xyz = np.asarray(
@@ -92,7 +109,11 @@ class LaneExtractor:
             if polyline is None:
                 self._previous_polylines.pop(lane_id, None)
                 continue
-            smoothed_polyline = self._smooth_polyline(lane_id, polyline.astype(np.float32))
+            smoothed_polyline = self._maybe_smooth_polyline(
+                lane_id,
+                polyline.astype(np.float32),
+                suppress_temporal_smoothing=suppress_temporal_smoothing,
+            )
             lanes.append(
                 LaneLine(
                     lane_id=lane_id,
@@ -112,7 +133,14 @@ class LaneExtractor:
                 )
             )
         if len(lanes) >= 2:
-            lanes = self._stabilize_lane_pair(lanes, ego_xyz, ego_yaw_rad, sensor_id=sensor_id, image_shape=image.shape)
+            lanes = self._stabilize_lane_pair(
+                lanes,
+                ego_xyz,
+                ego_yaw_rad,
+                sensor_id=sensor_id,
+                image_shape=image.shape,
+                suppress_temporal_smoothing=suppress_temporal_smoothing,
+            )
         return lanes
 
     def _recover_lane_pair(
@@ -120,12 +148,14 @@ class LaneExtractor:
         left_lane: np.ndarray | None,
         right_lane: np.ndarray | None,
         image_width: int,
+        *,
+        allow_stale_pair_recovery: bool = True,
     ) -> tuple[np.ndarray | None, np.ndarray | None]:
         default_offset_px = max(48.0, float(image_width) * self.default_lane_width_px_ratio)
         previous_left = self._previous_polylines.get("lane_left_stabilized")
         previous_right = self._previous_polylines.get("lane_right_stabilized")
         if left_lane is None and right_lane is None:
-            if previous_left is not None and previous_right is not None:
+            if allow_stale_pair_recovery and previous_left is not None and previous_right is not None:
                 return previous_left.copy(), previous_right.copy()
             return None, None
         if left_lane is None and right_lane is not None:
@@ -146,6 +176,7 @@ class LaneExtractor:
         *,
         sensor_id: str,
         image_shape: tuple[int, int, int],
+        suppress_temporal_smoothing: bool,
     ) -> list[LaneLine]:
         left_lane = next((lane for lane in lanes if lane.lane_id == "lane_left"), None)
         right_lane = next((lane for lane in lanes if lane.lane_id == "lane_right"), None)
@@ -162,8 +193,16 @@ class LaneExtractor:
         )
         lane_half_width_m = float(np.clip(np.mean(np.abs(right_lane.polyline_world[:, 1] - left_lane.polyline_world[:, 1])) * 0.5, 1.35, 2.1))
         left_world, right_world = self._offset_world_boundaries(center_world, lane_half_width_m)
-        left_image = self._smooth_polyline("lane_left_stabilized", center_image - np.array([18.0, 0.0], dtype=np.float32))
-        right_image = self._smooth_polyline("lane_right_stabilized", center_image + np.array([18.0, 0.0], dtype=np.float32))
+        left_image = self._maybe_smooth_polyline(
+            "lane_left_stabilized",
+            center_image - np.array([18.0, 0.0], dtype=np.float32),
+            suppress_temporal_smoothing=suppress_temporal_smoothing,
+        )
+        right_image = self._maybe_smooth_polyline(
+            "lane_right_stabilized",
+            center_image + np.array([18.0, 0.0], dtype=np.float32),
+            suppress_temporal_smoothing=suppress_temporal_smoothing,
+        )
 
         return [
             LaneLine(
@@ -225,6 +264,28 @@ class LaneExtractor:
         )
         self._previous_polylines[lane_id] = smoothed
         return smoothed
+
+    def _maybe_smooth_polyline(
+        self,
+        lane_id: str,
+        polyline: np.ndarray,
+        *,
+        suppress_temporal_smoothing: bool,
+    ) -> np.ndarray:
+        polyline = np.asarray(polyline, dtype=np.float32)
+        if suppress_temporal_smoothing:
+            self._previous_polylines[lane_id] = polyline.copy()
+            return polyline
+        return self._smooth_polyline(lane_id, polyline)
+
+    def _update_turn_smoothing_state(self, ego_yaw_rate_rad_s: float) -> bool:
+        yaw_rate_abs = abs(float(ego_yaw_rate_rad_s))
+        if self._turn_smoothing_suppressed:
+            if yaw_rate_abs <= self.turn_smoothing_resume_yaw_rate_rad_s:
+                self._turn_smoothing_suppressed = False
+        elif yaw_rate_abs >= self.turn_smoothing_disable_yaw_rate_rad_s:
+            self._turn_smoothing_suppressed = True
+        return self._turn_smoothing_suppressed
 
     def _lane_confidence(self, polyline: np.ndarray, image_width: int, image_height: int) -> float:
         span_y = float(np.max(polyline[:, 1]) - np.min(polyline[:, 1]))

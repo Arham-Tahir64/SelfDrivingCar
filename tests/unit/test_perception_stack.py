@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from autonomy_demo.interfaces.enums import ObjectClass, SensorStatus, TrackState
 from autonomy_demo.interfaces.types import CameraFrame, GnssReading, ImuReading, LidarFrame, ObjectDetection, RadarFrame, SensorFrameBundle
@@ -285,7 +286,7 @@ def test_perception_stack_merges_duplicate_tracks_across_cameras() -> None:
 def test_perception_stack_degrades_without_crashing() -> None:
     module = PerceptionStack(device="cpu", model_variant="bootstrap")
     bundle = _bundle()
-    module.lane_extractor.extract = lambda frame: (_ for _ in ()).throw(RuntimeError("lane fail"))  # type: ignore[method-assign]
+    module.lane_extractor.extract = lambda frame, **kwargs: (_ for _ in ()).throw(RuntimeError("lane fail"))  # type: ignore[method-assign]
     detections, lanes, drivable, traffic_lights, cones = module.run(bundle)
     assert detections == []
     assert lanes == []
@@ -293,6 +294,23 @@ def test_perception_stack_degrades_without_crashing() -> None:
     assert cones == []
     assert bundle.metadata["perception_status"] == "degraded"
     assert not bool(drivable.mask.any())
+
+
+def test_perception_stack_forwards_imu_yaw_rate_to_lane_extractor() -> None:
+    module = PerceptionStack(device="cpu", model_variant="bootstrap")
+    bundle = _bundle()
+    bundle.imu.gyro_xyz[2] = 0.37
+    captured_kwargs: dict[str, float] = {}
+
+    def _capture_lane_extract(frame, **kwargs):  # noqa: ANN001
+        captured_kwargs.update(kwargs)
+        return []
+
+    module.lane_extractor.extract = _capture_lane_extract  # type: ignore[method-assign]
+
+    module.run(bundle)
+
+    assert captured_kwargs["ego_yaw_rate_rad_s"] == pytest.approx(0.37)
 
 
 def test_lidar_perception_stack_extracts_clusters() -> None:

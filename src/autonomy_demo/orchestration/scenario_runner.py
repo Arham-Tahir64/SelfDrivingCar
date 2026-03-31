@@ -26,8 +26,6 @@ from autonomy_demo.replay.writer import Hdf5OrJsonReplayWriter
 from autonomy_demo.sensors.carla_sensor_suite import CarlaSensorSuite
 from autonomy_demo.sensors.sensor_manager import SensorManager
 from autonomy_demo.visualization.composite import CompositeVisualizationSink
-from autonomy_demo.visualization.pygame_camera_grid_view import PygameCameraGridVisualizationService
-from autonomy_demo.visualization.pygame_lidar_view import PygameLidarVisualizationService
 from autonomy_demo.sim.backends import CarlaSimulationBackend, StubSimulationBackend
 from autonomy_demo.visualization.service import NullVisualizationService
 from autonomy_demo.visualization.websocket_bridge import WebSocketBridge
@@ -133,9 +131,8 @@ class ScenarioRunner:
             )
             visualization_sinks.append(bridge)
             visualization_sinks.append(NullVisualizationService(enabled=True, output_dir=self.output_dir))
-            visualization_sinks.append(PygameCameraGridVisualizationService(output_dir=self.output_dir))
         if lidar_view:
-            visualization_sinks.append(PygameLidarVisualizationService(output_dir=self.output_dir))
+            self.logger.info("Ignoring lidar_view request for local Pygame windows; use the dashboard/websocket view instead.")
 
         if not visualization_sinks:
             visualization = NullVisualizationService(enabled=False, output_dir=self.output_dir)

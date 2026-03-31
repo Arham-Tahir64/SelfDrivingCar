@@ -25,12 +25,12 @@ from autonomy_demo.perception.internal_types import (
 )
 from autonomy_demo.perception.lane_extraction import LaneExtractor
 from autonomy_demo.perception.lidar_detection import LidarObstacleDetector
-from autonomy_demo.perception.lidar_tracking import SimpleCentroidTracker3D
+from autonomy_demo.perception.lidar_tracking import KalmanCentroidTracker3D, SimpleCentroidTracker3D
 from autonomy_demo.perception.object_detection import (
     YoloObjectDetector,
     bootstrap_annotations_from_metadata,
 )
-from autonomy_demo.perception.tracking import SimpleSortTracker
+from autonomy_demo.perception.tracking import KalmanSortTracker, SimpleSortTracker
 
 
 def _count_by_modality(
@@ -185,6 +185,7 @@ class _CameraSceneContextMixin:
             sensor_id=bundle.front_camera.sensor_id,
             ego_world_xyz=np.asarray(bundle.gnss.world_xyz, dtype=np.float32),
             ego_yaw_rad=float(bundle.metadata.get("ego_yaw_rad", 0.0)),
+            ego_yaw_rate_rad_s=float(bundle.imu.gyro_xyz[2]),
         )
         drivable_space = drivable_extractor.extract(
             bundle.front_camera.frame,
@@ -198,7 +199,7 @@ class PerceptionStack(_CameraSceneContextMixin):
 
     def __init__(self, *, device: str, model_variant: str) -> None:
         self.detector = YoloObjectDetector(model_variant=model_variant, device=device)
-        self.tracker = SimpleSortTracker()
+        self.tracker = KalmanSortTracker()
         self.lane_extractor = LaneExtractor()
         self.drivable_extractor = DrivableSpaceExtractor()
         self.logger = get_logger(__name__, perception_mode="camera_v1")
@@ -396,6 +397,7 @@ class PerceptionStack(_CameraSceneContextMixin):
                     source_modality=detection.source_modality,
                     source_sensor_ids=list(detection.source_sensor_ids or [detection.source_sensor_id]),
                     position_estimate_kind=detection.position_estimate_kind,
+                    gt_actor_id=detection.preferred_track_id,
                 )
             )
         return object_detections, traffic_lights
@@ -406,7 +408,7 @@ class LidarPerceptionStack(_CameraSceneContextMixin):
 
     def __init__(self) -> None:
         self.detector = LidarObstacleDetector()
-        self.tracker = SimpleCentroidTracker3D()
+        self.tracker = KalmanCentroidTracker3D()
         self.lane_extractor = LaneExtractor()
         self.drivable_extractor = DrivableSpaceExtractor()
         self.logger = get_logger(__name__, perception_mode="lidar_v1")
