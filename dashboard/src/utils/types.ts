@@ -138,6 +138,13 @@ export interface LidarPreview {
   points: number[][];
 }
 
+export interface BEVDrivableGrid {
+  grid_b64: string; // base64-encoded uint8 flat array (rows * cols)
+  rows: number;
+  cols: number;
+  cell_size_m: number;
+}
+
 export interface PipelineFrame {
   tick_id: number;
   sim_time_s: number;
@@ -154,5 +161,6 @@ export interface PipelineFrame {
   "planning/candidates"?: PlannerCandidate[];
   "visualization/camera_overlay"?: string;
   "visualization/lidar_preview"?: LidarPreview;
+  "visualization/bev_drivable"?: BEVDrivableGrid;
   "pipeline/latency"?: PipelineLatency;
 }

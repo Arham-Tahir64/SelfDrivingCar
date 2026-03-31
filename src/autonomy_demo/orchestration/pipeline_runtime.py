@@ -19,6 +19,7 @@ from autonomy_demo.interfaces.contracts import (
 )
 from autonomy_demo.interfaces.enums import TopicName
 from autonomy_demo.interfaces.types import ReplayFrame, ScenarioConfig
+from autonomy_demo.perception.bev_projection import BEVDrivableProjector
 
 
 def _time_ms() -> float:
@@ -43,6 +44,7 @@ class PipelineRuntime:
 
     def run(self, scenario: ScenarioConfig, max_ticks: int) -> None:
         latency = LatencyAccumulator()
+        bev_projector = BEVDrivableProjector()
         try:
             self.simulation.bootstrap(scenario)
             self.simulation.attach_sensors()
@@ -101,6 +103,14 @@ class PipelineRuntime:
                 t1 = _time_ms()
                 latency.record("localization", t1 - t0)
 
+                # Project drivable mask to BEV grid for dashboard visualization
+                bev_drivable_grid = None
+                if drivable_space is not None and ego_pose is not None:
+                    try:
+                        bev_drivable_grid = bev_projector.project(drivable_space, ego_pose)
+                    except Exception:
+                        pass
+
                 t0 = _time_ms()
                 local_map = self.mapping.run(detections, lanes, drivable_space, [], traffic_lights, ego_pose)
                 t1 = _time_ms()
@@ -146,6 +156,8 @@ class PipelineRuntime:
                 if candidates:
                     self.context.event_bus.publish(TopicName.PLANNING_CANDIDATES.value, candidates)
                 self.context.event_bus.publish(TopicName.CONTROL_VEHICLE_COMMAND.value, command)
+                if bev_drivable_grid is not None:
+                    self.context.event_bus.publish(TopicName.VISUALIZATION_BEV_DRIVABLE.value, bev_drivable_grid)
 
                 # Publish per-tick latency for the dashboard
                 tick_latency = latency.latest()
