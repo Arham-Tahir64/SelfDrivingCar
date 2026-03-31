@@ -1,0 +1,48 @@
+sensors:
+  front_camera:
+    type: rgb_camera
+    width: 960
+    height: 540
+    fov_deg: 90
+    fps: 10
+  rear_camera:
+    type: rgb_camera
+    width: 480
+    height: 270
+    fov_deg: 110
+    fps: 5
+  left_camera:
+    type: rgb_camera
+    width: 480
+    height: 270
+    fov_deg: 90
+    fps: 5
+  right_camera:
+    type: rgb_camera
+    width: 480
+    height: 270
+    fov_deg: 90
+    fps: 5
+  semantic_camera:
+    type: semantic_camera
+    width: 640
+    height: 360
+    fov_deg: 90
+    fps: 5
+  lidar:
+    type: lidar
+    channels: 32
+    range_m: 70
+    points_per_second: 250000
+    rotation_hz: 10
+  radar:
+    type: radar
+    range_m: 50
+    azimuth_deg: 30
+    fps: 10
+  gnss:
+    type: gnss
+    fps: 10
+  imu:
+    type: imu
+    fps: 50

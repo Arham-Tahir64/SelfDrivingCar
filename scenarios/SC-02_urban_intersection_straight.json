@@ -1,0 +1,12 @@
+{
+  "scenario_id": "SC-02A",
+  "name": "Urban Intersection Straight Start",
+  "map": "Town10HD",
+  "ego_spawn": { "x": 15.0, "y": -20.0, "yaw": 0.0 },
+  "ego_goal": { "x": 15.0, "y": 80.0 },
+  "max_duration_s": 120,
+  "npcs": [],
+  "props": [],
+  "triggers": [{ "type": "intersection_conflict", "at_s": 30.0 }],
+  "eval": { "min_completion_rate": 0.85, "max_collisions": 0 }
+}

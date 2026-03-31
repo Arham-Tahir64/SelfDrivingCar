@@ -6,12 +6,15 @@ __pycache__/
 .coverage
 htmlcov/
 .venv/
+.venv*/
 venv/
 build/
 dist/
 *.egg-info/
+.carla_api_cache/
 .env
 outputs/
 replays/
 logs/
-
+dashboard/node_modules/
+dashboard/dist/

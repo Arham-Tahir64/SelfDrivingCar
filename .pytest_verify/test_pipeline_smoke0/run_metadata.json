@@ -1,0 +1,13 @@
+{
+  "scenario_id": "SC-TEST",
+  "backend": "stub",
+  "map_name": "Town04",
+  "tick_hz": 20,
+  "planned_max_ticks": 2,
+  "executed_ticks": 2,
+  "route_plan": null,
+  "artifacts": {
+    "replay": "C:\\Users\\Arham\\Desktop\\SelfDrivingCar\\.pytest_verify\\test_pipeline_smoke0\\replay.json",
+    "evaluation": "C:\\Users\\Arham\\Desktop\\SelfDrivingCar\\.pytest_verify\\test_pipeline_smoke0\\evaluation_summary.json"
+  }
+}

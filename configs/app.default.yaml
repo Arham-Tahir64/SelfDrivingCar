@@ -1,7 +1,7 @@
 runtime:
   backend: stub
   tick_hz: 20
-  max_ticks: 5
+  max_ticks: 0
   output_dir: outputs
   log_level: INFO
   record_replay: true
@@ -10,7 +10,20 @@ runtime:
 carla:
   host: 127.0.0.1
   port: 2000
+  timeout_s: 30.0
+  sync_fps: 20
+  carla_root: C:\Users\Arham\Desktop\CARLA_0.9.16
+  python_api_wheel: C:\Users\Arham\Desktop\CARLA_0.9.16\PythonAPI\carla\dist\carla-0.9.16-cp312-cp312-win_amd64.whl
+  launch_executable: C:\Users\Arham\Desktop\CARLA_0.9.16\CarlaUE4.exe
   town: Town04
+  ego_vehicle_blueprint: vehicle.tesla.model3
+visualization:
+  ws_host: "0.0.0.0"
+  ws_port: 8765
+perception:
+  mode: camera_v1
+  device: cpu
+  model_variant: CarlaObject26.pt
 evaluation:
   latency_budget_ms:
     perception: 60
@@ -19,4 +32,3 @@ evaluation:
     prediction: 15
     planning: 20
     control: 5
-

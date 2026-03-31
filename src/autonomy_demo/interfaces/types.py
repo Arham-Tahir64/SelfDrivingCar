@@ -31,6 +31,7 @@ class CameraFrame:
     sensor_id: str
     frame: FloatArray
     timestamp_s: float
+    frame_id: int | None = None
     status: SensorStatus = SensorStatus.OK
 
     def __post_init__(self) -> None:
@@ -42,6 +43,7 @@ class CameraFrame:
 class LidarFrame:
     points_xyz: FloatArray
     timestamp_s: float
+    frame_id: int | None = None
     intensity: FloatArray | None = None
 
     def __post_init__(self) -> None:
@@ -56,6 +58,7 @@ class LidarFrame:
 class RadarFrame:
     detections: FloatArray
     timestamp_s: float
+    frame_id: int | None = None
 
     def __post_init__(self) -> None:
         self.detections = _float_array(self.detections)
@@ -65,6 +68,7 @@ class RadarFrame:
 class GnssReading:
     world_xyz: FloatArray
     timestamp_s: float
+    frame_id: int | None = None
 
     def __post_init__(self) -> None:
         self.world_xyz = _float_array(self.world_xyz, (3,))
@@ -75,6 +79,7 @@ class ImuReading:
     acceleration_xyz: FloatArray
     gyro_xyz: FloatArray
     timestamp_s: float
+    frame_id: int | None = None
 
     def __post_init__(self) -> None:
         self.acceleration_xyz = _float_array(self.acceleration_xyz, (3,))
@@ -105,19 +110,33 @@ class ObjectDetection:
     velocity: FloatArray
     confidence: float
     track_state: TrackState
+    image_bbox_xyxy: FloatArray | None = None
+    source_modality: str = "bootstrap"
+    source_sensor_ids: list[str] = field(default_factory=list)
+    position_estimate_kind: str = "truth_fallback"
+    gt_actor_id: int | None = None  # CARLA actor ID for MOT evaluation
 
     def __post_init__(self) -> None:
         self.object_class = ObjectClass(self.object_class)
         self.world_bbox_3d = _float_array(self.world_bbox_3d, (8, 3))
         self.velocity = _float_array(self.velocity, (3,))
+        self.source_sensor_ids = list(self.source_sensor_ids)
+        if self.image_bbox_xyxy is not None:
+            self.image_bbox_xyxy = _float_array(self.image_bbox_xyxy, (4,))
         if not 0.0 <= self.confidence <= 1.0:
             raise ValueError("confidence must be within [0, 1]")
+
+    @property
+    def centroid_xyz(self) -> FloatArray:
+        """Centroid of the 3D bounding box (mean of 8 corners)."""
+        return np.mean(self.world_bbox_3d, axis=0).astype(np.float32)
 
 
 @dataclass(slots=True)
 class ConeDetection:
     world_xyz: FloatArray
     confidence: float
+    source_modality: str = "bootstrap"
 
     def __post_init__(self) -> None:
         self.world_xyz = _float_array(self.world_xyz, (3,))
@@ -132,10 +151,14 @@ class LaneLine:
     polyline_world: FloatArray
     line_type: LaneLineType
     confidence: float
+    source_modality: str = "camera"
+    source_sensor_ids: list[str] = field(default_factory=list)
+    position_estimate_kind: str = "camera_projection"
 
     def __post_init__(self) -> None:
         self.polyline_image = _float_array(self.polyline_image)
         self.polyline_world = _float_array(self.polyline_world)
+        self.source_sensor_ids = list(self.source_sensor_ids)
         if self.polyline_image.ndim != 2 or self.polyline_image.shape[1] != 2:
             raise ValueError("polyline_image must be Nx2")
         if self.polyline_world.ndim != 2 or self.polyline_world.shape[1] != 3:
@@ -148,9 +171,16 @@ class TrafficLightDetection:
     state: TrafficLightState
     stop_line_distance_m: float
     confidence: float
+    image_bbox_xyxy: FloatArray | None = None
+    source_modality: str = "bootstrap"
+    source_sensor_ids: list[str] = field(default_factory=list)
+    position_estimate_kind: str = "truth_fallback"
 
     def __post_init__(self) -> None:
         self.world_xyz = _float_array(self.world_xyz, (3,))
+        self.source_sensor_ids = list(self.source_sensor_ids)
+        if self.image_bbox_xyxy is not None:
+            self.image_bbox_xyxy = _float_array(self.image_bbox_xyxy, (4,))
 
 
 @dataclass(slots=True)
@@ -186,9 +216,20 @@ class StaticLaneSegment:
     lane_id: str
     centerline_world: FloatArray
     speed_limit_mps: float
+    left_boundary_world: FloatArray = field(
+        default_factory=lambda: np.zeros((0, 3), dtype=np.float32)
+    )
+    right_boundary_world: FloatArray = field(
+        default_factory=lambda: np.zeros((0, 3), dtype=np.float32)
+    )
+    predecessor_lane_ids: list[str] = field(default_factory=list)
+    successor_lane_ids: list[str] = field(default_factory=list)
+    is_junction: bool = False
 
     def __post_init__(self) -> None:
         self.centerline_world = _float_array(self.centerline_world)
+        self.left_boundary_world = _float_array(self.left_boundary_world)
+        self.right_boundary_world = _float_array(self.right_boundary_world)
 
 
 @dataclass(slots=True)
@@ -198,6 +239,29 @@ class Waypoint:
     yaw: float
     velocity: float
     timestamp: float
+
+
+@dataclass(slots=True)
+class RouteWaypoint:
+    x: float
+    y: float
+    z: float
+    yaw: float
+    cumulative_distance_m: float
+    target_speed_mps: float
+
+
+@dataclass(slots=True)
+class RoutePlan:
+    waypoints: list[RouteWaypoint]
+    goal_xyz: FloatArray
+    total_distance_m: float
+    goal_tolerance_m: float = 5.0
+
+    def __post_init__(self) -> None:
+        self.goal_xyz = _float_array(self.goal_xyz, (3,))
+        if self.total_distance_m < 0.0:
+            raise ValueError("total_distance_m must be non-negative")
 
 
 @dataclass(slots=True)
@@ -217,6 +281,7 @@ class LocalMap:
     temporary_boundaries: list[LaneLine]
     closed_lanes: list[str]
     traffic_signal_states: list[TrafficLightDetection]
+    perceived_lanes: list[LaneLine] = field(default_factory=list)
     drivable_space: DrivableSpaceMask | None = None
 
 
@@ -235,6 +300,17 @@ class ControlCommand:
     hand_brake: bool = False
     reverse: bool = False
     emergency_override: bool = False
+
+
+@dataclass(slots=True)
+class PerceptionStatus:
+    active_mode: str
+    fallback_state: str
+    counts_by_modality: dict[str, int] = field(default_factory=dict)
+    active_camera_sensors: list[str] = field(default_factory=list)
+    detection_count: int = 0
+    cone_count: int = 0
+    traffic_light_count: int = 0
 
 
 @dataclass(slots=True)
@@ -314,6 +390,11 @@ class EvaluationSummary:
     red_light_violations: int
     pedestrian_clearance_min_m: float
     latency_ms: dict[str, float]
+    distance_traveled_m: float = 0.0
+    goal_reached: bool = False
+    sim_duration_s: float = 0.0
+    mean_speed_mps: float = 0.0
+    max_speed_mps: float = 0.0
     notes: list[str] = field(default_factory=list)
 
 
@@ -329,6 +410,17 @@ class RuntimeConfig:
     weather_preset: str
     carla_host: str
     carla_port: int
+    carla_timeout_s: float
+    carla_sync_fps: int
+    carla_root: Path
+    carla_python_api_wheel: Path
+    carla_launch_executable: Path
     town: str
+    ego_vehicle_blueprint: str
+    perception_mode: str
+    perception_device: str
+    perception_model_variant: str
     latency_budget_ms: dict[str, float]
-
+    ws_host: str = "0.0.0.0"
+    ws_port: int = 8765
+    enable_learned_perception: bool = True

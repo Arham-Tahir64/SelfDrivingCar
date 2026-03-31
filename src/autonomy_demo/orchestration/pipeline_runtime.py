@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 
+from autonomy_demo.eval.metrics import LatencyAccumulator
 from autonomy_demo.interfaces.contracts import (
     BehaviorPlanner,
     Controller,
@@ -17,6 +19,10 @@ from autonomy_demo.interfaces.contracts import (
 )
 from autonomy_demo.interfaces.enums import TopicName
 from autonomy_demo.interfaces.types import ReplayFrame, ScenarioConfig
+
+
+def _time_ms() -> float:
+    return time.perf_counter() * 1000.0
 
 
 @dataclass(slots=True)
@@ -36,44 +42,132 @@ class PipelineRuntime:
     evaluation: EvaluationHarness
 
     def run(self, scenario: ScenarioConfig, max_ticks: int) -> None:
-        self.simulation.bootstrap(scenario)
-        self.simulation.attach_sensors()
-        if self.visualization:
-            self.visualization.attach(self.context.event_bus)
-        for tick_id in range(max_ticks):
-            self.simulation.tick(tick_id)
-            sim_time_s = tick_id / 20.0
-            bundle = self.sensors.capture(tick_id, sim_time_s)
-            self.context.event_bus.publish(TopicName.SENSOR_CAMERA_FRONT.value, bundle.front_camera)
-            self.context.event_bus.publish(TopicName.SENSOR_LIDAR.value, bundle.lidar)
-            detections, lanes, drivable_space, traffic_lights, cones = self.perception.run(bundle)
-            ego_pose = self.localization.run(bundle)
-            local_map = self.mapping.run(detections, lanes, drivable_space, cones, traffic_lights, ego_pose)
-            predictions = self.prediction.run(local_map)
-            behavior_state = self.behavior_planner.run(local_map, ego_pose)
-            trajectory = self.motion_planner.run(local_map, ego_pose, predictions, behavior_state)
-            command = self.controller.run(trajectory, ego_pose)
+        latency = LatencyAccumulator()
+        try:
+            self.simulation.bootstrap(scenario)
+            self.simulation.attach_sensors()
+            self.sensors.setup()
+            self.sensors.warmup(self.simulation)
+            if hasattr(self.localization, "prepare"):
+                self.localization.prepare(self.simulation, scenario)
+            if hasattr(self.mapping, "prepare"):
+                self.mapping.prepare(self.simulation, scenario)
+            if hasattr(self.prediction, "prepare"):
+                self.prediction.prepare(self.simulation, scenario)
+            if hasattr(self.behavior_planner, "prepare"):
+                self.behavior_planner.prepare(self.simulation, scenario)
+            if hasattr(self.motion_planner, "prepare_route"):
+                self.motion_planner.prepare_route(self.simulation, scenario)
+            if hasattr(self.evaluation, "set_route_plan"):
+                self.evaluation.set_route_plan(getattr(self.motion_planner, "route_plan", None))
+            if self.visualization:
+                self.visualization.attach(self.context.event_bus)
+            self.context.event_bus.publish(
+                TopicName.SCENARIO_INFO.value,
+                {
+                    "scenario_id": scenario.scenario_id,
+                    "name": scenario.name,
+                    "map_name": scenario.map_name,
+                    "max_duration_s": scenario.max_duration_s,
+                },
+            )
+            for tick_id in range(max_ticks):
+                self.simulation.tick(tick_id)
+                sim_time_s = tick_id / 20.0
+                snapshot = getattr(self.simulation, "current_snapshot", None)
+                if snapshot is not None and hasattr(snapshot, "timestamp"):
+                    sim_time_s = float(snapshot.timestamp.elapsed_seconds)
+                bundle = self.sensors.capture(tick_id, sim_time_s)
+                self.context.event_bus.publish(TopicName.SENSOR_CAMERA_FRONT.value, bundle.front_camera)
+                self.context.event_bus.publish(TopicName.SENSOR_LIDAR.value, bundle.lidar)
 
-            self.context.event_bus.publish(TopicName.PERCEPTION_DETECTIONS.value, detections)
-            self.context.event_bus.publish(TopicName.PERCEPTION_LANES.value, lanes)
-            self.context.event_bus.publish(TopicName.PERCEPTION_DRIVABLE_SPACE.value, drivable_space)
-            self.context.event_bus.publish(TopicName.PERCEPTION_TRAFFIC_LIGHTS.value, traffic_lights)
-            self.context.event_bus.publish(TopicName.PERCEPTION_CONES.value, cones)
-            self.context.event_bus.publish(TopicName.LOCALIZATION_EGO_POSE.value, ego_pose)
-            self.context.event_bus.publish(TopicName.MAP_LOCAL_MAP.value, local_map)
-            self.context.event_bus.publish(TopicName.PREDICTION_AGENTS.value, predictions)
-            self.context.event_bus.publish(TopicName.PLANNING_EGO_TRAJECTORY.value, trajectory)
-            self.context.event_bus.publish(TopicName.CONTROL_VEHICLE_COMMAND.value, command)
+                # --- Timed pipeline stages ---
+                t0 = _time_ms()
+                detections, lanes, drivable_space, traffic_lights, _cones = self.perception.run(bundle)
+                t1 = _time_ms()
+                latency.record("perception", t1 - t0)
+                # Record learned perception sub-latencies if available
+                if "drivable_inference_ms" in bundle.metadata:
+                    latency.record("segformer_drivable", bundle.metadata["drivable_inference_ms"])
+                if "lane_inference_ms" in bundle.metadata:
+                    latency.record("learned_lanes", bundle.metadata["lane_inference_ms"])
 
-            self.simulation.apply_control(command)
-            snapshot = self.context.event_bus.snapshot()
-            self.evaluation.update(tick_id, snapshot)
-            if self.replay_writer and self.context.record_replay:
-                self.replay_writer.record(
-                    ReplayFrame(tick_id=tick_id, sim_time_s=sim_time_s, topic_payloads=snapshot)
+                bundle.metadata["debug_perception_detections"] = detections
+                if self.visualization and hasattr(self.visualization, "update_bundle"):
+                    self.visualization.update_bundle(bundle)
+
+                t0 = _time_ms()
+                ego_pose = self.localization.run(bundle)
+                t1 = _time_ms()
+                latency.record("localization", t1 - t0)
+
+                t0 = _time_ms()
+                local_map = self.mapping.run(detections, lanes, drivable_space, [], traffic_lights, ego_pose)
+                t1 = _time_ms()
+                latency.record("mapping", t1 - t0)
+
+                t0 = _time_ms()
+                predictions = self.prediction.run(local_map)
+                t1 = _time_ms()
+                latency.record("prediction", t1 - t0)
+
+                if hasattr(self.behavior_planner, "set_context"):
+                    self.behavior_planner.set_context(local_map, predictions)
+
+                t0 = _time_ms()
+                behavior_state = self.behavior_planner.run(local_map, ego_pose)
+                trajectory = self.motion_planner.run(local_map, ego_pose, predictions, behavior_state)
+                t1 = _time_ms()
+                latency.record("planning", t1 - t0)
+
+                if hasattr(self.controller, "set_context"):
+                    self.controller.set_context(local_map, predictions)
+
+                t0 = _time_ms()
+                command = self.controller.run(trajectory, ego_pose)
+                t1 = _time_ms()
+                latency.record("control", t1 - t0)
+
+                self.context.event_bus.publish(TopicName.PERCEPTION_DETECTIONS.value, detections)
+                self.context.event_bus.publish(TopicName.PERCEPTION_LANES.value, lanes)
+                self.context.event_bus.publish(TopicName.PERCEPTION_DRIVABLE_SPACE.value, drivable_space)
+                self.context.event_bus.publish(TopicName.PERCEPTION_TRAFFIC_LIGHTS.value, traffic_lights)
+                if "perception_summary" in bundle.metadata:
+                    self.context.event_bus.publish(
+                        TopicName.PERCEPTION_STATUS.value,
+                        bundle.metadata["perception_summary"],
+                    )
+                self.context.event_bus.publish(TopicName.LOCALIZATION_EGO_POSE.value, ego_pose)
+                self.context.event_bus.publish(TopicName.MAP_LOCAL_MAP.value, local_map)
+                self.context.event_bus.publish(TopicName.PREDICTION_AGENTS.value, predictions)
+                self.context.event_bus.publish(TopicName.PLANNING_EGO_TRAJECTORY.value, trajectory)
+                # Publish planner candidates for dashboard visualization
+                candidates = getattr(self.motion_planner, "last_candidates", None)
+                if candidates:
+                    self.context.event_bus.publish(TopicName.PLANNING_CANDIDATES.value, candidates)
+                self.context.event_bus.publish(TopicName.CONTROL_VEHICLE_COMMAND.value, command)
+
+                # Publish per-tick latency for the dashboard
+                tick_latency = latency.latest()
+                tick_latency["total"] = sum(tick_latency.values())
+                self.context.event_bus.publish(TopicName.PIPELINE_LATENCY.value, tick_latency)
+
+                self.context.event_bus.publish(
+                    TopicName.TICK_COMPLETE.value,
+                    {"tick_id": tick_id, "sim_time_s": sim_time_s},
                 )
 
-        self.simulation.shutdown()
-        if self.visualization:
-            self.visualization.flush()
-
+                self.simulation.apply_control(command)
+                snapshot = self.context.event_bus.snapshot()
+                self.evaluation.update(tick_id, snapshot)
+                if self.replay_writer and self.context.record_replay:
+                    self.replay_writer.record(
+                        ReplayFrame(tick_id=tick_id, sim_time_s=sim_time_s, topic_payloads=snapshot)
+                    )
+        finally:
+            # Feed accumulated latency into evaluation harness
+            if hasattr(self.evaluation, "set_latency"):
+                self.evaluation.set_latency(latency)
+            self.simulation.shutdown()
+            if self.visualization:
+                self.visualization.flush()

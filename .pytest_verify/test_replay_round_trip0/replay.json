@@ -1,0 +1,11 @@
+[
+  {
+    "tick_id": 0,
+    "sim_time_s": 0.0,
+    "topic_payloads": {
+      "control/vehicle_command": {
+        "throttle": 0.1
+      }
+    }
+  }
+]
