@@ -21,14 +21,20 @@ class SegFormerDrivableExtractor:
 
     Uses ``nvidia/segformer-b0-finetuned-cityscapes-1024-1024`` from HuggingFace.
     Runs on GPU when available, falls back to CPU.
+
+    Throttled to ``run_every_n_ticks`` to keep pipeline latency in budget.
+    Cached result is returned on skipped ticks.
     """
 
-    def __init__(self, *, device: str = "cuda") -> None:
+    def __init__(self, *, device: str = "cuda", run_every_n_ticks: int = 5) -> None:
         self._device = device if torch.cuda.is_available() else "cpu"
         self._model = None
         self._processor = None
         self._load_attempted = False
         self._last_inference_ms: float = 0.0
+        self._run_every_n_ticks = run_every_n_ticks
+        self._tick_counter: int = 0
+        self._cached_result: DrivableSpaceMask | None = None
 
     def _ensure_loaded(self) -> bool:
         if self._model is not None:
@@ -54,8 +60,17 @@ class SegFormerDrivableExtractor:
     def extract(self, frame: np.ndarray, sensor_id: str) -> DrivableSpaceMask | None:
         """Run SegFormer inference on a camera frame.
 
-        Returns None if the model isn't available (caller should fall back).
+        Returns cached result on skipped ticks to stay within latency budget.
+        Returns None only if model is unavailable (caller falls back to heuristic).
         """
+        self._tick_counter += 1
+
+        # Return cached result on non-inference ticks
+        if self._tick_counter % self._run_every_n_ticks != 1:
+            if self._cached_result is not None:
+                return self._cached_result
+            # No cache yet — fall through to run inference on first tick
+
         if not self._ensure_loaded():
             return None
 
@@ -106,11 +121,13 @@ class SegFormerDrivableExtractor:
         finally:
             self._last_inference_ms = (time.perf_counter() - t0) * 1000.0
 
-        return DrivableSpaceMask(
+        result = DrivableSpaceMask(
             mask=mask.astype(np.bool_),
             class_probabilities=class_probabilities,
             source_sensor_id=sensor_id,
         )
+        self._cached_result = result
+        return result
 
     @property
     def last_inference_ms(self) -> float:

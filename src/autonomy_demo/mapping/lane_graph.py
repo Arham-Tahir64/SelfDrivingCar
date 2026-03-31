@@ -48,6 +48,28 @@ class FrenetProjection:
 @dataclass(slots=True)
 class LaneGraph:
     segments: dict[str, StaticLaneSegment]
+    # Spatial index: (centroid_x, centroid_y, lane_id) built lazily
+    _centroid_index: list[tuple[float, float, str]] | None = None
+
+    def _build_centroid_index(self) -> None:
+        index: list[tuple[float, float, str]] = []
+        for lane_id, seg in self.segments.items():
+            if len(seg.centerline_world) >= 1:
+                c = np.mean(seg.centerline_world[:, :2], axis=0)
+                index.append((float(c[0]), float(c[1]), lane_id))
+        self._centroid_index = index
+
+    def _coarse_candidates(self, world_xyz: np.ndarray, radius_m: float) -> list[str]:
+        """Return lane IDs whose centroid is within radius_m of world_xyz."""
+        if self._centroid_index is None:
+            self._build_centroid_index()
+        px, py = float(world_xyz[0]), float(world_xyz[1])
+        r2 = radius_m * radius_m
+        return [
+            lane_id
+            for cx, cy, lane_id in self._centroid_index  # type: ignore[union-attr]
+            if (cx - px) ** 2 + (cy - py) ** 2 <= r2
+        ]
 
     def nearest_projection(
         self,
@@ -56,10 +78,14 @@ class LaneGraph:
         candidate_lane_ids: list[str] | None = None,
         max_height_delta_m: float = 4.0,
     ) -> FrenetProjection | None:
-        lane_ids = candidate_lane_ids or list(self.segments.keys())
+        # Use coarse spatial filter when no explicit candidates given
+        if candidate_lane_ids is None:
+            candidate_lane_ids = self._coarse_candidates(world_xyz, radius_m=80.0)
+            if not candidate_lane_ids:
+                candidate_lane_ids = list(self.segments.keys())  # fallback: all
         filtered: list[tuple[float, FrenetProjection]] = []
         fallback: list[tuple[float, float, FrenetProjection]] = []
-        for lane_id in lane_ids:
+        for lane_id in candidate_lane_ids:
             segment = self.segments.get(lane_id)
             if segment is None or len(segment.centerline_world) < 2:
                 continue
@@ -85,9 +111,15 @@ class LaneGraph:
         limit: int = 12,
         max_height_delta_m: float = 4.0,
     ) -> list[StaticLaneSegment]:
+        candidates = self._coarse_candidates(world_xyz, radius_m=radius_m + 20.0)
+        if not candidates:
+            candidates = list(self.segments.keys())
         filtered: list[tuple[float, StaticLaneSegment]] = []
         fallback: list[tuple[float, float, StaticLaneSegment]] = []
-        for segment in self.segments.values():
+        for lane_id in candidates:
+            segment = self.segments.get(lane_id)
+            if segment is None:
+                continue
             projection = project_point_to_centerline(segment.centerline_world, world_xyz)
             if projection.distance_m <= radius_m:
                 height_delta_m = float(abs(float(projection.nearest_xyz[2]) - float(world_xyz[2])))
