@@ -72,6 +72,7 @@ class FrenetMotionPlanner:
         predictions: list[AgentPrediction],
         behavior_state: BehaviorState,
     ) -> EgoTrajectory:
+        self.last_candidates: list[PlannerCandidate] = []
         route_guided = self._route_guided_trajectory(local_map, ego_pose, behavior_state)
         if route_guided is not None:
             return route_guided
@@ -82,6 +83,7 @@ class FrenetMotionPlanner:
         candidates = self._generate_candidates(local_map, ego_pose, predictions, behavior_state, reference_lane)
         if not candidates:
             return self._fallback.run(local_map, ego_pose, predictions, behavior_state)
+        self.last_candidates = candidates
         best = min(candidates, key=lambda candidate: candidate.score)
         return best.trajectory
 
@@ -190,8 +192,14 @@ class FrenetMotionPlanner:
             return [0.0]
         if behavior_state == BehaviorState.STOPPING_FOR_RED:
             return [0.0, max(ego_pose.speed_mps * 0.35, 1.0)]
+        if behavior_state == BehaviorState.PEDESTRIAN_YIELD:
+            return [0.0, max(ego_pose.speed_mps * 0.2, 0.5)]
+        if behavior_state == BehaviorState.EMERGENCY_YIELD:
+            return [max(ego_pose.speed_mps * 0.3, 1.0), 0.0]
         if behavior_state == BehaviorState.INTERSECTION_APPROACH:
             return [max(self.cruise_speed_mps * 0.5, 4.0), max(ego_pose.speed_mps * 0.7, 4.0)]
+        if behavior_state == BehaviorState.CONSTRUCTION_NAVIGATE:
+            return [max(self.cruise_speed_mps * 0.4, 3.0), max(ego_pose.speed_mps * 0.5, 3.0)]
         if behavior_state in {BehaviorState.PREPARE_MERGE, BehaviorState.MERGING}:
             return [max(self.cruise_speed_mps * 0.85, 6.0), max(ego_pose.speed_mps, 5.0)]
         return [self.cruise_speed_mps, max(ego_pose.speed_mps, self.cruise_speed_mps * 0.8)]
@@ -296,7 +304,18 @@ class FrenetMotionPlanner:
                     np.array([waypoint.x, waypoint.y], dtype=np.float32),
                     np.array([predicted_waypoint.x, predicted_waypoint.y], dtype=np.float32),
                 )
-                min_clearance = min(min_clearance, clearance)
+                # Widen the safety margin using prediction uncertainty when available
+                uncertainty_radius = 0.0
+                if (
+                    prediction.covariance_by_step is not None
+                    and index < len(prediction.covariance_by_step)
+                ):
+                    cov = prediction.covariance_by_step[index]
+                    uncertainty_radius = float(
+                        np.sqrt(max(float(cov[0, 0]), float(cov[1, 1])))
+                    )
+                effective_clearance = clearance - uncertainty_radius
+                min_clearance = min(min_clearance, effective_clearance)
 
         score += lane_offset_sum * 5.0
         score += smoothness_penalty * 2.0

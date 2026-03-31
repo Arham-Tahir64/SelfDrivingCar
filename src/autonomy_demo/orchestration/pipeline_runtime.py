@@ -136,6 +136,10 @@ class PipelineRuntime:
                 self.context.event_bus.publish(TopicName.MAP_LOCAL_MAP.value, local_map)
                 self.context.event_bus.publish(TopicName.PREDICTION_AGENTS.value, predictions)
                 self.context.event_bus.publish(TopicName.PLANNING_EGO_TRAJECTORY.value, trajectory)
+                # Publish planner candidates for dashboard visualization
+                candidates = getattr(self.motion_planner, "last_candidates", None)
+                if candidates:
+                    self.context.event_bus.publish(TopicName.PLANNING_CANDIDATES.value, candidates)
                 self.context.event_bus.publish(TopicName.CONTROL_VEHICLE_COMMAND.value, command)
 
                 # Publish per-tick latency for the dashboard

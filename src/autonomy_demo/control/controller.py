@@ -102,6 +102,14 @@ class RouteFollowerController:
         if trajectory.behavior_state == BehaviorState.STOPPING_FOR_RED:
             brake = max(brake, 0.45)
             throttle = min(throttle, 0.15)
+        elif trajectory.behavior_state == BehaviorState.PEDESTRIAN_YIELD:
+            brake = max(brake, 0.5)
+            throttle = min(throttle, 0.1)
+        elif trajectory.behavior_state == BehaviorState.EMERGENCY_YIELD:
+            brake = max(brake, 0.35)
+            throttle = min(throttle, 0.25)
+        elif trajectory.behavior_state == BehaviorState.CONSTRUCTION_NAVIGATE:
+            throttle = min(throttle, 0.35)
         elif trajectory.behavior_state == BehaviorState.INTERSECTION_APPROACH:
             throttle = min(throttle, 0.45)
         command = ControlCommand(

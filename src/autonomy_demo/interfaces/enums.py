@@ -68,4 +68,5 @@ class TopicName(str, Enum):
     SCENARIO_INFO = "system/scenario_info"
     VISUALIZATION_CAMERA_OVERLAY = "visualization/camera_overlay"
     VISUALIZATION_LIDAR_PREVIEW = "visualization/lidar_preview"
+    PLANNING_CANDIDATES = "planning/candidates"
     PIPELINE_LATENCY = "pipeline/latency"

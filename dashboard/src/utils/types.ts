@@ -55,6 +55,7 @@ export interface AgentPrediction {
   object_class: string;
   predicted_trajectory: Waypoint[];
   confidence_by_step: number[];
+  covariance_by_step?: number[][][];
 }
 
 export interface EgoPose {
@@ -115,6 +116,13 @@ export interface PerceptionStatus {
   traffic_light_count: number;
 }
 
+export interface PlannerCandidate {
+  trajectory: EgoTrajectory;
+  lane_id: string;
+  target_speed_mps: number;
+  score: number;
+}
+
 export interface PipelineLatency {
   perception: number;
   localization: number;
@@ -143,6 +151,7 @@ export interface PipelineFrame {
   "control/vehicle_command"?: ControlCommand;
   "perception/status"?: PerceptionStatus;
   "system/scenario_info"?: ScenarioInfo;
+  "planning/candidates"?: PlannerCandidate[];
   "visualization/camera_overlay"?: string;
   "visualization/lidar_preview"?: LidarPreview;
   "pipeline/latency"?: PipelineLatency;
