@@ -227,6 +227,21 @@ def _lane_boundaries(centerline_points: np.ndarray, headings_rad: np.ndarray, la
     )
 
 
+def _lane_points_follow_lane_heading(waypoints: list) -> bool:
+    if len(waypoints) < 2:
+        return True
+    start = waypoints[0].transform.location
+    end = waypoints[-1].transform.location
+    delta_x = float(end.x) - float(start.x)
+    delta_y = float(end.y) - float(start.y)
+    if math.hypot(delta_x, delta_y) <= 1e-3:
+        return True
+    heading_rad = math.radians(float(waypoints[0].transform.rotation.yaw))
+    forward_x = math.cos(heading_rad)
+    forward_y = math.sin(heading_rad)
+    return ((forward_x * delta_x) + (forward_y * delta_y)) >= 0.0
+
+
 def build_lane_graph_from_world(world, carla_module, *, step_m: float = 4.0) -> LaneGraph:
     carla_map = world.get_map()
     grouped: dict[str, list] = {}
@@ -249,6 +264,8 @@ def build_lane_graph_from_world(world, carla_module, *, step_m: float = 4.0) -> 
             deduped.append(waypoint)
         if len(deduped) < 2:
             continue
+        if not _lane_points_follow_lane_heading(deduped):
+            deduped.reverse()
 
         centerline_points = np.asarray(
             [

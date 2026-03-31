@@ -220,6 +220,19 @@ class _FakeNpcActor:
         self.last_control = control
 
 
+class _FakeExistingActor:
+    def __init__(self, type_id: str) -> None:
+        self.type_id = type_id
+        self.destroyed = False
+        self.stopped = False
+
+    def stop(self) -> None:
+        self.stopped = True
+
+    def destroy(self) -> None:
+        self.destroyed = True
+
+
 def test_carla_sensor_converters() -> None:
     suite = CarlaSensorSuite({"sensors": {}}, _Backend())
     camera = suite._camera_frame("front_camera", _FakeImage(), current_frame=7)
@@ -277,6 +290,27 @@ def test_npc_target_speed_defaults_by_behavior() -> None:
     assert CarlaSimulationBackend._npc_target_speed_mps("cross_traffic") == pytest.approx(6.0)
     assert CarlaSimulationBackend._npc_target_speed_mps("parked") == pytest.approx(0.0)
     assert CarlaSimulationBackend._npc_target_speed_mps("default") == pytest.approx(8.0)
+
+
+def test_clear_dynamic_actors_removes_stale_runtime_actors_only() -> None:
+    runtime = load_runtime_config(Path("fixtures/configs/app.test.yaml"))
+    backend = CarlaSimulationBackend(runtime)
+    vehicle = _FakeExistingActor("vehicle.tesla.model3")
+    sensor = _FakeExistingActor("sensor.camera.rgb")
+    walker_controller = _FakeExistingActor("controller.ai.walker")
+    traffic_light = _FakeExistingActor("traffic.traffic_light")
+    backend.state.world = type(
+        "World",
+        (),
+        {"get_actors": lambda self: [vehicle, sensor, walker_controller, traffic_light]},
+    )()
+
+    backend._clear_dynamic_actors()
+
+    assert vehicle.destroyed is True
+    assert sensor.destroyed is True
+    assert walker_controller.destroyed is True
+    assert traffic_light.destroyed is False
 
 
 def test_spawn_scenario_actors_prefers_goal_aligned_lane_for_unset_npc_yaw() -> None:

@@ -82,7 +82,8 @@ class RouteFollowerController:
                 brake=0.65,
                 emergency_override=False,
             )
-            return self._apply_emergency_override(command, ego_pose)
+            command = self._apply_emergency_override(command, ego_pose)
+            return self._apply_launch_assist(command, ego_pose, trajectory.behavior_state, target_speed)
 
         speed_error = float(target_speed - ego_pose.speed_mps)
         self._integral_speed_error = clamp(
@@ -118,7 +119,8 @@ class RouteFollowerController:
             brake=brake,
             emergency_override=False,
         )
-        return self._apply_emergency_override(command, ego_pose)
+        command = self._apply_emergency_override(command, ego_pose)
+        return self._apply_launch_assist(command, ego_pose, trajectory.behavior_state, target_speed)
 
     def _apply_emergency_override(self, command: ControlCommand, ego_pose: EgoPose) -> ControlCommand:
         risk = self._lead_vehicle_risk(ego_pose)
@@ -152,15 +154,46 @@ class RouteFollowerController:
         # Comfort zone: lead vehicle ahead but not critical — allow gentle following
         if gap_m <= self.emergency_gap_m * 2.0:
             throttle_scale = clamp((gap_m - self.emergency_gap_m) / self.emergency_gap_m, 0.0, 1.0)
+            comfort_brake = command.brake
+            if ego_pose.speed_mps >= 2.0:
+                comfort_brake = max(command.brake, 0.1 * (1.0 - throttle_scale))
             return ControlCommand(
                 throttle=command.throttle * throttle_scale,
                 steer=command.steer,
-                brake=max(command.brake, 0.1 * (1.0 - throttle_scale)),
+                brake=comfort_brake,
                 hand_brake=command.hand_brake,
                 reverse=command.reverse,
                 emergency_override=False,
             )
         return command
+
+    def _apply_launch_assist(
+        self,
+        command: ControlCommand,
+        ego_pose: EgoPose,
+        behavior_state: BehaviorState,
+        target_speed: float,
+    ) -> ControlCommand:
+        if command.emergency_override:
+            return command
+        if behavior_state in {
+            BehaviorState.GOAL_REACHED,
+            BehaviorState.STOPPING_FOR_RED,
+            BehaviorState.PEDESTRIAN_YIELD,
+        }:
+            return command
+        if target_speed <= 0.5 or ego_pose.speed_mps > 1.0:
+            return command
+        if command.throttle <= 0.0 or command.brake >= 0.15:
+            return command
+        return ControlCommand(
+            throttle=max(float(command.throttle), 0.25),
+            steer=command.steer,
+            brake=0.0,
+            hand_brake=command.hand_brake,
+            reverse=command.reverse,
+            emergency_override=False,
+        )
 
     def _lead_vehicle_risk(self, ego_pose: EgoPose) -> tuple[float, float] | None:
         current_lane = None

@@ -24,7 +24,13 @@ from autonomy_demo.interfaces.types import (
     Pose2D,
 )
 from autonomy_demo.localization.module import MapAwareLocalizationModule
-from autonomy_demo.mapping.lane_graph import FrenetProjection, LaneGraph, LaneGraphProvider, project_point_to_centerline
+from autonomy_demo.mapping.lane_graph import (
+    FrenetProjection,
+    LaneGraph,
+    LaneGraphProvider,
+    build_lane_graph_from_world,
+    project_point_to_centerline,
+)
 from autonomy_demo.mapping.module import MapAwareMappingModule
 from autonomy_demo.prediction.module import LaneAwarePredictionModule
 
@@ -74,6 +80,80 @@ def _bundle(world_xyz: np.ndarray, *, yaw_rad: float = 0.0) -> SensorFrameBundle
     )
 
 
+class _FakeLaneType:
+    Driving = "Driving"
+
+
+class _FakeCarlaModule:
+    LaneType = _FakeLaneType
+
+
+class _FakeLaneLocation:
+    def __init__(self, x: float, y: float, z: float = 0.0) -> None:
+        self.x = x
+        self.y = y
+        self.z = z
+
+
+class _FakeLaneRotation:
+    def __init__(self, yaw: float) -> None:
+        self.yaw = yaw
+
+
+class _FakeLaneTransform:
+    def __init__(self, x: float, y: float, z: float, yaw: float) -> None:
+        self.location = _FakeLaneLocation(x, y, z)
+        self.rotation = _FakeLaneRotation(yaw)
+
+
+class _FakeLaneWaypoint:
+    def __init__(
+        self,
+        *,
+        x: float,
+        y: float,
+        z: float = 0.0,
+        yaw: float = 0.0,
+        s: float = 0.0,
+        road_id: int = 1,
+        section_id: int = 0,
+        lane_id: int = 1,
+    ) -> None:
+        self.transform = _FakeLaneTransform(x, y, z, yaw)
+        self.s = s
+        self.road_id = road_id
+        self.section_id = section_id
+        self.lane_id = lane_id
+        self.lane_type = _FakeLaneType.Driving
+        self.lane_width = 3.5
+        self.is_junction = False
+
+    def previous(self, distance_m: float):
+        del distance_m
+        return []
+
+    def next(self, distance_m: float):
+        del distance_m
+        return []
+
+
+class _FakeLaneMap:
+    def __init__(self, waypoints: list[_FakeLaneWaypoint]) -> None:
+        self._waypoints = list(waypoints)
+
+    def generate_waypoints(self, step_m: float):
+        del step_m
+        return list(self._waypoints)
+
+
+class _FakeLaneWorld:
+    def __init__(self, waypoints: list[_FakeLaneWaypoint]) -> None:
+        self._map = _FakeLaneMap(waypoints)
+
+    def get_map(self) -> _FakeLaneMap:
+        return self._map
+
+
 def test_frenet_projection_on_simple_centerline() -> None:
     projection: FrenetProjection = project_point_to_centerline(
         np.array([[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]], dtype=np.float32),
@@ -112,6 +192,21 @@ def test_lane_graph_prefers_same_height_lane_for_nearest_projection() -> None:
     projection = lane_graph.nearest_projection(np.array([5.0, 0.3, 10.2], dtype=np.float32))
     assert projection is not None
     assert projection.lane_id == "highway"
+
+
+def test_build_lane_graph_reverses_waypoint_order_when_s_runs_against_lane_heading() -> None:
+    world = _FakeLaneWorld(
+        [
+            _FakeLaneWaypoint(x=10.0, y=0.0, yaw=0.0, s=0.0),
+            _FakeLaneWaypoint(x=5.0, y=0.0, yaw=0.0, s=5.0),
+            _FakeLaneWaypoint(x=0.0, y=0.0, yaw=0.0, s=10.0),
+        ]
+    )
+
+    lane_graph = build_lane_graph_from_world(world, _FakeCarlaModule(), step_m=5.0)
+    segment = lane_graph.segments["road_1:section_0:lane_1"]
+
+    assert segment.centerline_world[:, 0].tolist() == [0.0, 5.0, 10.0]
 
 
 def test_lane_graph_nearby_lanes_filters_out_stacked_roads() -> None:

@@ -425,3 +425,71 @@ def test_controller_emergency_override_brakes_for_small_front_camera_vehicle_box
     command = controller.run(trajectory, _ego_pose())
     assert command.emergency_override is True
     assert command.brake >= 0.9
+
+
+def test_controller_launch_assist_clears_tiny_follow_brake_from_standstill() -> None:
+    controller = RouteFollowerController()
+    local_map = LocalMap(
+        static_lanes=[_lane("road_1:section_0:lane_1", 0.0)],
+        dynamic_agents=[_lead_detection(10.0, 0.0, speed=1.0, source_modality="bootstrap")],
+        cone_instances=[],
+        temporary_boundaries=[],
+        closed_lanes=[],
+        traffic_signal_states=[],
+        drivable_space=None,
+    )
+    controller.set_context(local_map, [])
+    ego_pose = EgoPose(
+        world_xyz=np.array([2.0, 0.0, 0.0], dtype=np.float32),
+        yaw_rad=0.0,
+        speed_mps=0.0,
+        acceleration_mps2=0.0,
+        current_lane_id="road_1:section_0:lane_1",
+        frenet_s=2.0,
+        frenet_d=0.0,
+        heading_error_rad=0.0,
+    )
+    trajectory = FrenetMotionPlanner(horizon_steps=4, dt_s=0.2, cruise_speed_mps=8.0).run(
+        local_map,
+        ego_pose,
+        [],
+        BehaviorState.LANE_KEEP,
+    )
+    command = controller.run(trajectory, ego_pose)
+    assert command.emergency_override is False
+    assert command.brake == 0.0
+    assert command.throttle >= 0.25
+
+
+def test_controller_comfort_zone_follow_does_not_apply_brake_at_crawl_speed() -> None:
+    controller = RouteFollowerController()
+    local_map = LocalMap(
+        static_lanes=[_lane("road_1:section_0:lane_1", 0.0)],
+        dynamic_agents=[_lead_detection(10.0, 0.0, speed=1.0, source_modality="bootstrap")],
+        cone_instances=[],
+        temporary_boundaries=[],
+        closed_lanes=[],
+        traffic_signal_states=[],
+        drivable_space=None,
+    )
+    controller.set_context(local_map, [])
+    ego_pose = EgoPose(
+        world_xyz=np.array([2.0, 0.0, 0.0], dtype=np.float32),
+        yaw_rad=0.0,
+        speed_mps=0.7,
+        acceleration_mps2=0.0,
+        current_lane_id="road_1:section_0:lane_1",
+        frenet_s=2.0,
+        frenet_d=0.0,
+        heading_error_rad=0.0,
+    )
+    trajectory = FrenetMotionPlanner(horizon_steps=4, dt_s=0.2, cruise_speed_mps=8.0).run(
+        local_map,
+        ego_pose,
+        [],
+        BehaviorState.LANE_KEEP,
+    )
+    command = controller.run(trajectory, ego_pose)
+    assert command.emergency_override is False
+    assert command.brake == 0.0
+    assert command.throttle > 0.0

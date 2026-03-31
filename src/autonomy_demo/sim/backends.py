@@ -110,6 +110,7 @@ class CarlaSimulationBackend(StubSimulationBackend):
         settings.fixed_delta_seconds = 1.0 / float(self.runtime_config.carla_sync_fps)
         settings.no_rendering_mode = False
         self.state.world.apply_settings(settings)
+        self._clear_dynamic_actors()
         self.state.world.set_weather(
             weather_from_name(self.state.carla, self.runtime_config.weather_preset)
         )
@@ -172,6 +173,16 @@ class CarlaSimulationBackend(StubSimulationBackend):
             raise CarlaRuntimeError(
                 f"Unable to spawn ego vehicle with blueprint {self.runtime_config.ego_vehicle_blueprint}"
             )
+        if hasattr(actor, "set_autopilot"):
+            try:
+                actor.set_autopilot(False)
+            except Exception:
+                self.logger.debug("Could not disable autopilot on spawned ego actor %s", getattr(actor, "id", None))
+        if hasattr(actor, "set_simulate_physics"):
+            try:
+                actor.set_simulate_physics(True)
+            except Exception:
+                self.logger.debug("Could not force physics on for spawned ego actor %s", getattr(actor, "id", None))
         self.state.ego_actor = actor
         self._update_spectator_view()
 
@@ -441,6 +452,30 @@ class CarlaSimulationBackend(StubSimulationBackend):
         self.state.current_snapshot = self.current_snapshot
         self._update_spectator_view()
         self.logger.debug("CARLA world tick %s -> frame %s", tick_id, self.current_frame)
+
+    def _clear_dynamic_actors(self) -> None:
+        if self.state.world is None:
+            return
+        dynamic_prefixes = ("vehicle.", "walker.", "sensor.")
+        cleared = 0
+        for actor in list(self.state.world.get_actors()):
+            type_id = str(getattr(actor, "type_id", ""))
+            if not (
+                type_id.startswith(dynamic_prefixes)
+                or type_id == "controller.ai.walker"
+            ):
+                continue
+            try:
+                actor.stop()
+            except Exception:
+                pass
+            try:
+                actor.destroy()
+                cleared += 1
+            except Exception:
+                self.logger.debug("Failed to destroy pre-existing actor %s (%s)", getattr(actor, "id", None), type_id)
+        if cleared:
+            self.logger.info("Cleared %s pre-existing dynamic CARLA actor(s) before scenario spawn", cleared)
 
     def _update_spectator_view(self) -> None:
         if self.state.world is None or self.state.ego_actor is None:
