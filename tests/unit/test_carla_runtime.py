@@ -342,3 +342,36 @@ def test_resolve_npc_route_xy_follows_lane_instead_of_cutting_to_adjacent_lane()
     )
 
     assert route_xy == pytest.approx([(6.0, 0.0), (12.0, 0.0), (18.0, 0.0)])
+
+
+def test_resolve_npc_route_xy_prefers_raw_goal_over_projected_turn_lane() -> None:
+    runtime = load_runtime_config(Path("fixtures/configs/app.test.yaml"))
+    backend = CarlaSimulationBackend(runtime)
+    backend.state.carla = _FakeCarla()
+
+    straight_wp_2 = _FakeWaypoint(_FakeTransform(12.0, 0.0, 0.0))
+    straight_wp_1 = _FakeWaypoint(_FakeTransform(6.0, 0.0, 0.0), next_waypoints=[straight_wp_2])
+    right_turn_wp = _FakeWaypoint(_FakeTransform(6.0, -6.0, -90.0))
+    start_wp = _FakeWaypoint(
+        _FakeTransform(0.0, 0.0, 0.0),
+        next_waypoints=[straight_wp_1, right_turn_wp],
+    )
+    projected_turn_lane_wp = _FakeWaypoint(_FakeTransform(18.0, -6.0, 0.0))
+
+    backend.state.world = _FakeWorld(
+        _FakeMap(
+            road_waypoint=None,
+            spawn_points=[],
+            waypoints_by_xy={
+                (0.0, 0.0): start_wp,
+                (18.0, 0.0): projected_turn_lane_wp,
+            },
+        )
+    )
+
+    route_xy = backend._resolve_npc_route_xy(
+        spawn_xy=(0.0, 0.0),
+        route_points=[Point2D(x=18.0, y=0.0, z=0.0)],
+    )
+
+    assert route_xy[0] == pytest.approx((6.0, 0.0))

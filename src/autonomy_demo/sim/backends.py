@@ -511,7 +511,7 @@ class CarlaSimulationBackend(StubSimulationBackend):
         max_steps: int = 64,
     ) -> list[tuple[float, float]]:
         start_location = self._project_to_driving_location(start_xy[0], start_xy[1])
-        goal_location = self._project_to_driving_location(goal_xy[0], goal_xy[1])
+        goal_location = self.state.carla.Location(x=float(goal_xy[0]), y=float(goal_xy[1]), z=0.0)
         current_waypoint = self.state.world.get_map().get_waypoint(
             start_location,
             project_to_road=True,
