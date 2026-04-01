@@ -19,6 +19,8 @@ _DEFAULT_FRONT_CAMERA_CALIBRATION = {
 }
 _ROAD_PROB_THRESHOLD = 0.35
 _GRID_CONFIDENCE_THRESHOLD = 40.0
+_GRID_KEEP_THRESHOLD = 28.0
+_GRID_CLOSE_ITERATIONS = 3
 
 
 def _rotation_x(angle_rad: float) -> np.ndarray:
@@ -179,12 +181,90 @@ class BEVDrivableProjector:
                 result &= padded[dy : dy + mask.shape[0], dx : dx + mask.shape[1]]
         return result
 
+    def _fill_holes(self, mask: np.ndarray) -> np.ndarray:
+        mask = mask.astype(np.bool_)
+        if not mask.any():
+            return mask
+        inverse = ~mask
+        visited = np.zeros_like(mask, dtype=np.bool_)
+        stack: list[tuple[int, int]] = []
+        rows, cols = mask.shape
+
+        def _push(r: int, c: int) -> None:
+            if r < 0 or r >= rows or c < 0 or c >= cols:
+                return
+            if visited[r, c] or not inverse[r, c]:
+                return
+            visited[r, c] = True
+            stack.append((r, c))
+
+        for r in range(rows):
+            _push(r, 0)
+            _push(r, cols - 1)
+        for c in range(cols):
+            _push(0, c)
+            _push(rows - 1, c)
+
+        while stack:
+            r, c = stack.pop()
+            _push(r - 1, c)
+            _push(r + 1, c)
+            _push(r, c - 1)
+            _push(r, c + 1)
+
+        holes = inverse & ~visited
+        return mask | holes
+
+    def _keep_ego_connected_component(self, mask: np.ndarray) -> np.ndarray:
+        if not mask.any():
+            return mask.astype(np.bool_)
+        try:
+            import cv2  # type: ignore
+
+            num_labels, labels, stats, _centroids = cv2.connectedComponentsWithStats(
+                mask.astype(np.uint8),
+                connectivity=8,
+            )
+            if num_labels <= 1:
+                return mask.astype(np.bool_)
+            rows, cols = mask.shape
+            near_ego_seed = np.zeros_like(mask, dtype=np.bool_)
+            near_ego_seed[max(rows - 8, 0) :, max((cols // 2) - 8, 0) : min((cols // 2) + 8, cols)] = True
+            fallback_seed = np.zeros_like(mask, dtype=np.bool_)
+            fallback_seed[max(rows - 8, 0) :, :] = True
+
+            best_label = 1
+            best_score = -1
+            for label in range(1, num_labels):
+                component = labels == label
+                area = int(stats[label, 4])
+                if np.any(component & near_ego_seed):
+                    score = area + 10_000
+                elif np.any(component & fallback_seed):
+                    score = area + 1_000
+                else:
+                    score = area
+                if score > best_score:
+                    best_score = score
+                    best_label = label
+            return (labels == best_label).astype(np.bool_)
+        except Exception:
+            return mask.astype(np.bool_)
+
     def _cleanup_grid(self, grid: np.ndarray) -> np.ndarray:
-        binary = grid >= _GRID_CONFIDENCE_THRESHOLD
+        binary = grid >= _GRID_KEEP_THRESHOLD
         if not binary.any():
             return np.zeros_like(grid, dtype=np.uint8)
-        closed = self._binary_erode(self._binary_dilate(binary))
-        cleaned = np.where(closed, np.maximum(grid, _GRID_CONFIDENCE_THRESHOLD), 0.0)
+        closed = binary
+        for _ in range(_GRID_CLOSE_ITERATIONS):
+            closed = self._binary_dilate(closed)
+        for _ in range(_GRID_CLOSE_ITERATIONS):
+            closed = self._binary_erode(closed)
+        connected = self._keep_ego_connected_component(closed)
+        filled = self._fill_holes(connected)
+        smoothed = self._binary_dilate(filled)
+        smoothed = self._keep_ego_connected_component(smoothed)
+        cleaned = np.where(smoothed, np.maximum(grid, _GRID_CONFIDENCE_THRESHOLD), 0.0)
         return np.clip(cleaned, 0, 255).astype(np.uint8)
 
     def project(
@@ -249,21 +329,35 @@ class BEVDrivableProjector:
         lateral_m = lateral_m[in_bounds]
         confidences = confidences[in_bounds]
 
-        rows = np.floor((FORWARD_RANGE_M - forward_m) / CELL_SIZE_M).astype(np.int32)
-        cols = np.floor((lateral_m + LATERAL_RANGE_M) / CELL_SIZE_M).astype(np.int32)
-        valid_indices = (
-            (rows >= 0)
-            & (rows < GRID_SIZE)
-            & (cols >= 0)
-            & (cols < GRID_SIZE)
-        )
-        if not np.any(valid_indices):
-            return np.zeros((GRID_SIZE, GRID_SIZE), dtype=np.uint8)
+        row_pos = ((FORWARD_RANGE_M - forward_m) / CELL_SIZE_M) - 0.5
+        col_pos = ((lateral_m + LATERAL_RANGE_M) / CELL_SIZE_M) - 0.5
+        row_floor = np.floor(row_pos).astype(np.int32)
+        col_floor = np.floor(col_pos).astype(np.int32)
+        row_frac = row_pos - row_floor
+        col_frac = col_pos - col_floor
 
-        rows = rows[valid_indices]
-        cols = cols[valid_indices]
-        confidences = confidences[valid_indices]
+        row_candidates = (
+            (row_floor, col_floor, (1.0 - row_frac) * (1.0 - col_frac)),
+            (row_floor + 1, col_floor, row_frac * (1.0 - col_frac)),
+            (row_floor, col_floor + 1, (1.0 - row_frac) * col_frac),
+            (row_floor + 1, col_floor + 1, row_frac * col_frac),
+        )
 
         grid = np.zeros((GRID_SIZE, GRID_SIZE), dtype=np.float32)
-        np.maximum.at(grid, (rows, cols), confidences)
+        for rows, cols, weights in row_candidates:
+            valid_indices = (
+                (rows >= 0)
+                & (rows < GRID_SIZE)
+                & (cols >= 0)
+                & (cols < GRID_SIZE)
+                & (weights > 1e-6)
+            )
+            if not np.any(valid_indices):
+                continue
+            weighted_confidences = confidences[valid_indices] * weights[valid_indices]
+            np.maximum.at(
+                grid,
+                (rows[valid_indices], cols[valid_indices]),
+                weighted_confidences,
+            )
         return self._cleanup_grid(grid)

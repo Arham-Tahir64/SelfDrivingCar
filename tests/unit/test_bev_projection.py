@@ -114,3 +114,24 @@ def test_bev_projection_discards_pixels_above_horizon_or_behind_camera() -> None
     )
 
     assert not grid.any()
+
+
+def test_bev_projection_turns_sparse_stripes_into_contiguous_ground_patch() -> None:
+    projector = BEVDrivableProjector()
+    mask = np.zeros((120, 200), dtype=np.bool_)
+    for col in range(70, 130, 4):
+        mask[62:, col : col + 2] = True
+
+    grid = projector.project(
+        _drivable(mask),
+        _ego_pose(),
+        camera_calibration=_pitched_calibration(*mask.shape),
+    )
+
+    occupied = np.argwhere(grid > 0)
+    assert occupied.size > 0
+    row_min, col_min = occupied.min(axis=0)
+    row_max, col_max = occupied.max(axis=0)
+    window = grid[row_min : row_max + 1, col_min : col_max + 1] > 0
+    density = float(window.mean())
+    assert density >= 0.55

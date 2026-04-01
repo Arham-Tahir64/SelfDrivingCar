@@ -5,10 +5,6 @@ import { useFrameStore } from "../store/frameStore";
 import { frameInterpolationAlpha, interpolateEgoPose } from "../utils/interpolation";
 import { worldToScene, yawToScene, dampAngle } from "../utils/scene";
 
-const GRID_SIZE = 100;
-const CELL_SIZE_M = 0.5;
-const PLANE_SIZE = GRID_SIZE * CELL_SIZE_M; // 50 m
-
 // Green-tinted colour for drivable area
 const DRIVABLE_R = 0;
 const DRIVABLE_G = 220;
@@ -17,6 +13,7 @@ const MAX_ALPHA = 140; // semi-transparent
 
 const POSITION_SMOOTHING = 0.22;
 const ROTATION_SMOOTHING = 0.18;
+const GROUND_EPSILON = 0.02;
 
 function decodeBase64(b64: string): Uint8Array {
   const binary = atob(b64);
@@ -27,7 +24,35 @@ function decodeBase64(b64: string): Uint8Array {
   return bytes;
 }
 
+function buildDrivableTexture(
+  grid: Uint8Array,
+  rows: number,
+  cols: number,
+): Uint8Array {
+  // Texture contract:
+  // - texture width = forward distance (near -> far)
+  // - texture height = lateral position (left -> right)
+  // - grid rows are far -> near, so reverse them into texture x
+  // - grid cols are left -> right, so mirror them to compensate for the
+  //   plane's rotated local-y -> world-z convention in the dashboard scene
+  const rgba = new Uint8Array(rows * cols * 4);
+  for (let row = 0; row < rows; row++) {
+    const texX = rows - 1 - row;
+    for (let col = 0; col < cols; col++) {
+      const texY = cols - 1 - col;
+      const confidence = grid[(row * cols) + col];
+      const idx = ((texY * rows) + texX) * 4;
+      rgba[idx] = DRIVABLE_R;
+      rgba[idx + 1] = DRIVABLE_G;
+      rgba[idx + 2] = DRIVABLE_B;
+      rgba[idx + 3] = confidence > 20 ? Math.min(confidence, MAX_ALPHA) : 0;
+    }
+  }
+  return rgba;
+}
+
 export default function DrivableSurface() {
+  const groupRef = useRef<THREE.Group>(null);
   const meshRef = useRef<THREE.Mesh>(null);
   const textureRef = useRef<THREE.DataTexture | null>(null);
   const lastTickRef = useRef<number | null>(null);
@@ -38,7 +63,8 @@ export default function DrivableSurface() {
     const state = useFrameStore.getState();
     const frame = state.currentFrame;
     const mesh = meshRef.current;
-    if (!mesh || !frame) return;
+    const group = groupRef.current;
+    if (!mesh || !group || !frame) return;
 
     // Interpolate ego pose for smooth movement
     const alpha = frameInterpolationAlpha(
@@ -53,28 +79,22 @@ export default function DrivableSurface() {
     );
 
     if (ego) {
-      // Position: ego centre, offset forward by half the grid (grid goes 50m ahead of ego)
       const egoScene = worldToScene(ego.world_xyz);
       const yaw = yawToScene(ego.yaw_rad);
 
-      // The grid centre is PLANE_SIZE/2 ahead of ego in the ego-forward direction
-      const forwardOffset = PLANE_SIZE / 2;
-      const offsetX = Math.cos(-yaw) * forwardOffset;
-      const offsetZ = Math.sin(-yaw) * forwardOffset;
-
       targetPosition.current.set(
-        egoScene.x + offsetX,
-        0.02, // just above ground
-        egoScene.z + offsetZ,
+        egoScene.x,
+        0.0,
+        egoScene.z,
       );
 
       if (!initialized.current) {
-        mesh.position.copy(targetPosition.current);
-        mesh.rotation.y = yaw;
+        group.position.copy(targetPosition.current);
+        group.rotation.y = yaw;
         initialized.current = true;
       } else {
-        mesh.position.lerp(targetPosition.current, POSITION_SMOOTHING);
-        mesh.rotation.y = dampAngle(mesh.rotation.y, yaw, ROTATION_SMOOTHING);
+        group.position.lerp(targetPosition.current, POSITION_SMOOTHING);
+        group.rotation.y = dampAngle(group.rotation.y, yaw, ROTATION_SMOOTHING);
       }
     }
 
@@ -86,46 +106,47 @@ export default function DrivableSurface() {
     const grid = decodeBase64(bevData.grid_b64);
     const rows = bevData.rows;
     const cols = bevData.cols;
+    const cellSize = bevData.cell_size_m;
+    const forwardRange = rows * cellSize;
+    const lateralWidth = cols * cellSize;
 
-    // Create RGBA texture data
-    const rgba = new Uint8Array(rows * cols * 4);
-    for (let r = 0; r < rows; r++) {
-      // Flip vertically: texture row 0 is bottom, but grid row 0 is far ahead
-      const srcRow = rows - 1 - r;
-      for (let c = 0; c < cols; c++) {
-        const confidence = grid[srcRow * cols + c];
-        const idx = (r * cols + c) * 4;
-        rgba[idx] = DRIVABLE_R;
-        rgba[idx + 1] = DRIVABLE_G;
-        rgba[idx + 2] = DRIVABLE_B;
-        rgba[idx + 3] = confidence > 20 ? Math.min(confidence, MAX_ALPHA) : 0;
-      }
-    }
+    mesh.position.set(forwardRange * 0.5, GROUND_EPSILON, 0.0);
+    mesh.scale.set(forwardRange, lateralWidth, 1.0);
 
-    if (!textureRef.current) {
+    const rgba = buildDrivableTexture(grid, rows, cols);
+    const textureBytes = rgba as unknown as ArrayBufferView<ArrayBuffer>;
+
+    if (
+      !textureRef.current
+      || textureRef.current.image.width !== rows
+      || textureRef.current.image.height !== cols
+    ) {
       textureRef.current = new THREE.DataTexture(
-        rgba,
-        cols,
+        textureBytes,
         rows,
+        cols,
         THREE.RGBAFormat,
       );
       textureRef.current.magFilter = THREE.NearestFilter;
       textureRef.current.minFilter = THREE.NearestFilter;
+      textureRef.current.flipY = false;
       textureRef.current.needsUpdate = true;
 
       const mat = mesh.material as THREE.MeshBasicMaterial;
       mat.map = textureRef.current;
       mat.needsUpdate = true;
     } else {
-      textureRef.current.image.data.set(rgba);
+      (textureRef.current.image.data as Uint8Array).set(rgba);
       textureRef.current.needsUpdate = true;
     }
   });
 
   return (
-    <mesh ref={meshRef} rotation-x={-Math.PI / 2}>
-      <planeGeometry args={[PLANE_SIZE, PLANE_SIZE]} />
-      <meshBasicMaterial transparent depthWrite={false} side={THREE.DoubleSide} />
-    </mesh>
+    <group ref={groupRef}>
+      <mesh ref={meshRef} rotation-x={-Math.PI / 2}>
+        <planeGeometry args={[1, 1]} />
+        <meshBasicMaterial transparent depthWrite={false} side={THREE.FrontSide} />
+      </mesh>
+    </group>
   );
 }
