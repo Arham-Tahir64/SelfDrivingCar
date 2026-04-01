@@ -20,6 +20,7 @@ _SKIP_TOPICS = frozenset(
         TopicName.SENSOR_CAMERA_FRONT.value,
         TopicName.SENSOR_LIDAR.value,
         TopicName.PERCEPTION_DRIVABLE_SPACE.value,
+        TopicName.VISUALIZATION_BEV_DRIVABLE.value,
     }
 )
 
@@ -123,6 +124,16 @@ class WebSocketBridge:
         if lidar_frame is not None and hasattr(lidar_frame, "points_xyz"):
             message[TopicName.VISUALIZATION_LIDAR_PREVIEW.value] = {
                 "points": _downsample_lidar(lidar_frame.points_xyz),
+            }
+
+        # Inject BEV drivable grid as base64
+        bev_grid = snapshot.get(TopicName.VISUALIZATION_BEV_DRIVABLE.value)
+        if isinstance(bev_grid, np.ndarray):
+            message[TopicName.VISUALIZATION_BEV_DRIVABLE.value] = {
+                "grid_b64": base64.b64encode(bev_grid.tobytes()).decode("ascii"),
+                "rows": bev_grid.shape[0],
+                "cols": bev_grid.shape[1],
+                "cell_size_m": 0.5,
             }
 
         # Include pipeline latency if present
