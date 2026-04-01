@@ -18,7 +18,6 @@ function heightToColor(z: number): string {
 export default function LidarPanel() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const lidarData = useFrameStore((s) => s.currentFrame?.["visualization/lidar_preview"]);
-  const ego = useFrameStore((s) => s.currentFrame?.["localization/ego_pose"]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -58,18 +57,11 @@ export default function LidarPanel() {
       return;
     }
 
-    const egoX = ego?.world_xyz?.[0] ?? 0;
-    const egoY = ego?.world_xyz?.[1] ?? 0;
-    const yaw = ego?.yaw_rad ?? 0;
-    const cosYaw = Math.cos(-yaw);
-    const sinYaw = Math.sin(-yaw);
-
     for (const pt of lidarData.points) {
-      // Transform to ego-relative
-      const dx = pt[0] - egoX;
-      const dy = pt[1] - egoY;
-      const localX = dx * cosYaw - dy * sinYaw;
-      const localY = dx * sinYaw + dy * cosYaw;
+      // CARLA ray-cast LiDAR points arrive in ego/sensor-local coordinates:
+      // x = forward, y = lateral, z = height.
+      const localX = pt[0] ?? 0;
+      const localY = pt[1] ?? 0;
       const z = pt[2] ?? 0;
 
       // Skip points outside range
@@ -95,7 +87,7 @@ export default function LidarPanel() {
     ctx.lineTo(ex + 4, ey + 4);
     ctx.closePath();
     ctx.fill();
-  }, [lidarData, ego]);
+  }, [lidarData]);
 
   return (
     <div style={styles.container}>
