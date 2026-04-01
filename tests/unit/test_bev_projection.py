@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from autonomy_demo.interfaces.types import DrivableSpaceMask, EgoPose
+from autonomy_demo.interfaces.types import DrivableSpaceMask, EgoPose, LocalMap, StaticLaneSegment, RoutePlan, RouteWaypoint
 from autonomy_demo.perception.bev_projection import BEVDrivableProjector, GRID_SIZE
 
 
@@ -38,6 +38,59 @@ def _pitched_calibration(height: int, width: int) -> dict[str, object]:
         "mount_xyz": [2.3, 0.0, 1.2],
         "mount_rpy_deg": [0.0, 12.0, 0.0],
     }
+
+
+def _static_lane(
+    lane_id: str,
+    *,
+    x0: float,
+    x1: float,
+    center_y: float = 0.0,
+    predecessors: list[str] | None = None,
+    successors: list[str] | None = None,
+    is_junction: bool = False,
+) -> StaticLaneSegment:
+    centerline = np.array([[x0, center_y, 0.0], [x1, center_y, 0.0]], dtype=np.float32)
+    left = np.array([[x0, center_y + 1.75, 0.0], [x1, center_y + 1.75, 0.0]], dtype=np.float32)
+    right = np.array([[x0, center_y - 1.75, 0.0], [x1, center_y - 1.75, 0.0]], dtype=np.float32)
+    return StaticLaneSegment(
+        lane_id=lane_id,
+        centerline_world=centerline,
+        speed_limit_mps=12.0,
+        left_boundary_world=left,
+        right_boundary_world=right,
+        predecessor_lane_ids=list(predecessors or []),
+        successor_lane_ids=list(successors or []),
+        is_junction=is_junction,
+    )
+
+
+def _local_map(static_lanes: list[StaticLaneSegment]) -> LocalMap:
+    return LocalMap(
+        static_lanes=static_lanes,
+        dynamic_agents=[],
+        cone_instances=[],
+        temporary_boundaries=[],
+        closed_lanes=[],
+        traffic_signal_states=[],
+        perceived_lanes=[],
+        drivable_space=None,
+    )
+
+
+def _route_plan() -> RoutePlan:
+    return RoutePlan(
+        waypoints=[
+            RouteWaypoint(x=-10.0, y=0.0, z=0.0, yaw=0.0, cumulative_distance_m=0.0, target_speed_mps=12.0),
+            RouteWaypoint(x=0.0, y=0.0, z=0.0, yaw=0.0, cumulative_distance_m=10.0, target_speed_mps=12.0),
+            RouteWaypoint(x=10.0, y=0.0, z=0.0, yaw=0.0, cumulative_distance_m=20.0, target_speed_mps=12.0),
+            RouteWaypoint(x=20.0, y=0.0, z=0.0, yaw=0.0, cumulative_distance_m=30.0, target_speed_mps=12.0),
+            RouteWaypoint(x=30.0, y=0.0, z=0.0, yaw=0.0, cumulative_distance_m=40.0, target_speed_mps=12.0),
+        ],
+        goal_xyz=np.array([30.0, 0.0, 0.0], dtype=np.float32),
+        total_distance_m=40.0,
+        goal_tolerance_m=5.0,
+    )
 
 
 def test_bev_projection_projects_centered_road_band_into_centered_ribbon() -> None:
@@ -135,3 +188,89 @@ def test_bev_projection_turns_sparse_stripes_into_contiguous_ground_patch() -> N
     window = grid[row_min : row_max + 1, col_min : col_max + 1] > 0
     density = float(window.mean())
     assert density >= 0.55
+
+
+def test_world_history_persists_behind_ego_after_motion() -> None:
+    projector = BEVDrivableProjector()
+    lane = _static_lane("lane_001", x0=-10.0, x1=40.0)
+    ego_start = _ego_pose()
+    corridor = projector.build_route_corridor(_local_map([lane]), ego_start, route_plan=_route_plan())
+
+    projector.update_world_history(
+        np.array([[5.0, 0.0]], dtype=np.float32),
+        np.array([220.0], dtype=np.float32),
+        sim_time_s=0.0,
+        corridor_polygons_xy=list(corridor["polygons_xy"]),
+    )
+
+    ego_moved = EgoPose(
+        world_xyz=np.array([10.0, 0.0, 0.0], dtype=np.float32),
+        yaw_rad=0.0,
+        speed_mps=0.0,
+        acceleration_mps2=0.0,
+        current_lane_id="lane_001",
+        frenet_s=0.0,
+        frenet_d=0.0,
+        heading_error_rad=0.0,
+    )
+    crop = projector.render_local_crop(ego_moved, sim_time_s=1.0)
+    grid = crop["grid"]
+
+    expected_row = int(np.floor((crop["x_max_m"] - (-5.0)) / crop["cell_size_m"]))
+    occupied = np.argwhere(grid > 0)
+    assert occupied.size > 0
+    assert np.any(np.abs(occupied[:, 0] - expected_row) <= 1)
+
+
+def test_route_corridor_prefers_route_successor_over_side_branch() -> None:
+    projector = BEVDrivableProjector()
+    predecessor = _static_lane("lane_prev", x0=-20.0, x1=0.0, successors=["lane_curr"])
+    current = _static_lane(
+        "lane_curr",
+        x0=0.0,
+        x1=20.0,
+        predecessors=["lane_prev"],
+        successors=["lane_next", "lane_branch"],
+    )
+    successor = _static_lane("lane_next", x0=20.0, x1=40.0, predecessors=["lane_curr"])
+    branch = _static_lane("lane_branch", x0=20.0, x1=35.0, center_y=6.0, predecessors=["lane_curr"])
+
+    corridor = projector.build_route_corridor(
+        _local_map([predecessor, current, successor, branch]),
+        EgoPose(
+            world_xyz=np.array([5.0, 0.0, 0.0], dtype=np.float32),
+            yaw_rad=0.0,
+            speed_mps=0.0,
+            acceleration_mps2=0.0,
+            current_lane_id="lane_curr",
+            frenet_s=0.0,
+            frenet_d=0.0,
+            heading_error_rad=0.0,
+        ),
+        route_plan=_route_plan(),
+    )
+
+    lane_ids = [strip["lane_id"] for strip in corridor["strips"]]
+    assert "lane_prev" in lane_ids
+    assert "lane_curr" in lane_ids
+    assert "lane_next" in lane_ids
+    assert "lane_branch" not in lane_ids
+
+
+def test_world_history_clips_out_of_corridor_points() -> None:
+    projector = BEVDrivableProjector()
+    lane = _static_lane("lane_001", x0=-10.0, x1=40.0)
+    corridor = projector.build_route_corridor(_local_map([lane]), _ego_pose(), route_plan=_route_plan())
+
+    projector.update_world_history(
+        np.array([[5.0, 0.0], [5.0, 8.0]], dtype=np.float32),
+        np.array([200.0, 220.0], dtype=np.float32),
+        sim_time_s=0.0,
+        corridor_polygons_xy=list(corridor["polygons_xy"]),
+    )
+    crop = projector.render_local_crop(_ego_pose(), sim_time_s=0.2)
+    occupied = np.argwhere(crop["grid"] > 0)
+
+    assert occupied.size > 0
+    col_values = occupied[:, 1]
+    assert np.all(col_values < crop["cols"] - 8)

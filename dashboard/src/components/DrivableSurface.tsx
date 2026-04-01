@@ -106,11 +106,14 @@ export default function DrivableSurface() {
     const grid = decodeBase64(bevData.grid_b64);
     const rows = bevData.rows;
     const cols = bevData.cols;
-    const cellSize = bevData.cell_size_m;
-    const forwardRange = rows * cellSize;
-    const lateralWidth = cols * cellSize;
+    const xMin = bevData.x_min_m;
+    const xMax = bevData.x_max_m;
+    const yMin = bevData.y_min_m;
+    const yMax = bevData.y_max_m;
+    const forwardRange = xMax - xMin;
+    const lateralWidth = yMax - yMin;
 
-    mesh.position.set(forwardRange * 0.5, GROUND_EPSILON, 0.0);
+    mesh.position.set((xMin + xMax) * 0.5, GROUND_EPSILON, (yMin + yMax) * 0.5);
     mesh.scale.set(forwardRange, lateralWidth, 1.0);
 
     const rgba = buildDrivableTexture(grid, rows, cols);

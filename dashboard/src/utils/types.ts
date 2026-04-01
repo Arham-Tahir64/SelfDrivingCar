@@ -143,6 +143,22 @@ export interface BEVDrivableGrid {
   rows: number;
   cols: number;
   cell_size_m: number;
+  x_min_m: number;
+  x_max_m: number;
+  y_min_m: number;
+  y_max_m: number;
+}
+
+export interface RoadCorridorStrip {
+  lane_id: string;
+  left_boundary_world: number[][];
+  right_boundary_world: number[][];
+  polygon_world: number[][];
+  is_junction?: boolean;
+}
+
+export interface RoadCorridorPayload {
+  strips: RoadCorridorStrip[];
 }
 
 export interface PipelineFrame {
@@ -162,5 +178,6 @@ export interface PipelineFrame {
   "visualization/camera_overlay"?: string;
   "visualization/lidar_preview"?: LidarPreview;
   "visualization/bev_drivable"?: BEVDrivableGrid;
+  "visualization/road_corridor"?: RoadCorridorPayload;
   "pipeline/latency"?: PipelineLatency;
 }

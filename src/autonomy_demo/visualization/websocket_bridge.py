@@ -30,6 +30,7 @@ _WS_TOPICS = frozenset(
         TopicName.SCENARIO_INFO.value,
         TopicName.VISUALIZATION_CAMERA_OVERLAY.value,
         TopicName.VISUALIZATION_BEV_DRIVABLE.value,
+        TopicName.VISUALIZATION_ROAD_CORRIDOR.value,
         TopicName.SENSOR_LIDAR.value,
         TopicName.PIPELINE_LATENCY.value,
     }
@@ -246,12 +247,16 @@ class WebSocketBridge:
 
         # Inject BEV drivable grid as base64
         bev_grid = snapshot.get(TopicName.VISUALIZATION_BEV_DRIVABLE.value)
-        if isinstance(bev_grid, np.ndarray):
+        if isinstance(bev_grid, dict) and isinstance(bev_grid.get("grid"), np.ndarray):
             message[TopicName.VISUALIZATION_BEV_DRIVABLE.value] = {
-                "grid_b64": base64.b64encode(bev_grid.tobytes()).decode("ascii"),
-                "rows": bev_grid.shape[0],
-                "cols": bev_grid.shape[1],
-                "cell_size_m": 0.5,
+                "grid_b64": base64.b64encode(bev_grid["grid"].tobytes()).decode("ascii"),
+                "rows": int(bev_grid["rows"]),
+                "cols": int(bev_grid["cols"]),
+                "cell_size_m": float(bev_grid["cell_size_m"]),
+                "x_min_m": float(bev_grid["x_min_m"]),
+                "x_max_m": float(bev_grid["x_max_m"]),
+                "y_min_m": float(bev_grid["y_min_m"]),
+                "y_max_m": float(bev_grid["y_max_m"]),
             }
 
         # Include pipeline latency if present

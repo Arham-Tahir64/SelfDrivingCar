@@ -103,24 +103,40 @@ class PipelineRuntime:
                 t1 = _time_ms()
                 latency.record("localization", t1 - t0)
 
-                # Project drivable mask to BEV grid for dashboard visualization
+                t0 = _time_ms()
+                local_map = self.mapping.run(detections, lanes, drivable_space, [], traffic_lights, ego_pose)
+                t1 = _time_ms()
+                latency.record("mapping", t1 - t0)
+
                 bev_drivable_grid = None
-                if drivable_space is not None and ego_pose is not None:
-                    try:
-                        bev_drivable_grid = bev_projector.project(
+                road_corridor = None
+                try:
+                    road_corridor = bev_projector.build_route_corridor(
+                        local_map,
+                        ego_pose,
+                        route_plan=getattr(self.motion_planner, "route_plan", None),
+                    )
+                    if drivable_space is not None and ego_pose is not None:
+                        world_points_xy, confidences = bev_projector.project_world_points(
                             drivable_space,
                             ego_pose,
                             camera_calibration=(
                                 bundle.metadata.get("camera_calibration", {}) or {}
                             ).get("front_camera"),
                         )
-                    except Exception:
-                        pass
-
-                t0 = _time_ms()
-                local_map = self.mapping.run(detections, lanes, drivable_space, [], traffic_lights, ego_pose)
-                t1 = _time_ms()
-                latency.record("mapping", t1 - t0)
+                        bev_projector.update_world_history(
+                            world_points_xy,
+                            confidences,
+                            sim_time_s=float(sim_time_s),
+                            corridor_polygons_xy=list(road_corridor.get("polygons_xy", [])),
+                        )
+                    if ego_pose is not None:
+                        bev_drivable_grid = bev_projector.render_local_crop(
+                            ego_pose,
+                            sim_time_s=float(sim_time_s),
+                        )
+                except Exception:
+                    pass
 
                 t0 = _time_ms()
                 predictions = self.prediction.run(local_map)
@@ -164,6 +180,11 @@ class PipelineRuntime:
                 self.context.event_bus.publish(TopicName.CONTROL_VEHICLE_COMMAND.value, command)
                 if bev_drivable_grid is not None:
                     self.context.event_bus.publish(TopicName.VISUALIZATION_BEV_DRIVABLE.value, bev_drivable_grid)
+                if road_corridor is not None:
+                    self.context.event_bus.publish(
+                        TopicName.VISUALIZATION_ROAD_CORRIDOR.value,
+                        {"strips": list(road_corridor.get("strips", []))},
+                    )
 
                 # Publish per-tick latency for the dashboard
                 tick_latency = latency.latest()
