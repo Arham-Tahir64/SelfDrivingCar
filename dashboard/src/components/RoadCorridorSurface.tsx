@@ -11,6 +11,7 @@ const ROAD_BORDER = new THREE.Color("#4f7d70");
 export default function RoadCorridorSurface() {
   const groupRef = useRef<THREE.Group>(null);
   const lastTickRef = useRef<number | null>(null);
+  const lastSignatureRef = useRef<string>("");
 
   useFrame(() => {
     const frame = useFrameStore.getState().currentFrame;
@@ -19,10 +20,15 @@ export default function RoadCorridorSurface() {
     if (!frame || lastTickRef.current === frame.tick_id) return;
     lastTickRef.current = frame.tick_id;
 
-    disposeObject3D(group);
-
     const corridor = frame["visualization/road_corridor"];
     const strips = corridor?.strips ?? [];
+    const signature = strips.map((strip) => strip.lane_id).join("|");
+    if (signature === lastSignatureRef.current) {
+      return;
+    }
+    lastSignatureRef.current = signature;
+
+    disposeObject3D(group);
     for (const strip of strips) {
       const polygon = strip.polygon_world ?? [];
       if (polygon.length < 3) continue;
@@ -33,7 +39,7 @@ export default function RoadCorridorSurface() {
       });
       const shape = new THREE.Shape(points);
       const geometry = new THREE.ShapeGeometry(shape);
-      const material = new THREE.MeshStandardMaterial({
+      const material = new THREE.MeshBasicMaterial({
         color: ROAD_FILL,
         transparent: true,
         opacity: strip.is_junction ? 0.36 : 0.28,

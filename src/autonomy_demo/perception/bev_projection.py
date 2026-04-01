@@ -19,6 +19,7 @@ _CROP_Y_MIN_M = -15.0
 _CROP_Y_MAX_M = 15.0
 _HISTORY_DECAY_S = 4.0
 _HISTORY_PRUNE_DISTANCE_M = 90.0
+_MAX_HISTORY_SAMPLES = 2200
 
 _DEFAULT_FRONT_CAMERA_CALIBRATION = {
     "fov_deg": 90.0,
@@ -66,6 +67,8 @@ class BEVDrivableProjector:
         self._camera_origin_ego = np.zeros(3, dtype=np.float32)
         self._cache_key: tuple[Any, ...] | None = None
         self._history: dict[tuple[int, int], tuple[float, float]] = {}
+        self._corridor_cache_key: tuple[str, ...] | None = None
+        self._corridor_cache_payload: dict[str, Any] | None = None
 
     def _normalise_calibration(
         self,
@@ -479,6 +482,9 @@ class BEVDrivableProjector:
                 continue
             seen.add(lane_id)
             unique_lane_ids.append(lane_id)
+        corridor_cache_key = tuple(unique_lane_ids)
+        if corridor_cache_key == self._corridor_cache_key and self._corridor_cache_payload is not None:
+            return self._corridor_cache_payload
 
         strips: list[dict[str, Any]] = []
         polygons_xy: list[np.ndarray] = []
@@ -498,7 +504,10 @@ class BEVDrivableProjector:
                 }
             )
             polygons_xy.append(np.asarray(polygon_world[:, :2], dtype=np.float32))
-        return {"strips": strips, "polygons_xy": polygons_xy}
+        payload = {"strips": strips, "polygons_xy": polygons_xy}
+        self._corridor_cache_key = corridor_cache_key
+        self._corridor_cache_payload = payload
+        return payload
 
     def _points_in_polygon(self, points_xy: np.ndarray, polygon_xy: np.ndarray) -> np.ndarray:
         if points_xy.size == 0 or len(polygon_xy) < 3:
@@ -529,6 +538,21 @@ class BEVDrivableProjector:
         for polygon_xy in polygons_xy:
             inside_any |= self._points_in_polygon(points_world_xy, polygon_xy)
         return points_world_xy[inside_any], confidences[inside_any]
+
+    def _downsample_history_points(
+        self,
+        points_world_xy: np.ndarray,
+        confidences: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        if points_world_xy.shape[0] <= _MAX_HISTORY_SAMPLES:
+            return points_world_xy, confidences
+        indices = np.linspace(
+            0,
+            points_world_xy.shape[0] - 1,
+            _MAX_HISTORY_SAMPLES,
+            dtype=np.int32,
+        )
+        return points_world_xy[indices], confidences[indices]
 
     def _ego_to_world_xy(self, points_ego: np.ndarray, ego_pose: EgoPose) -> np.ndarray:
         yaw = float(ego_pose.yaw_rad)
@@ -636,9 +660,13 @@ class BEVDrivableProjector:
         if points_world_xy.size == 0:
             self._prune_history(sim_time_s=sim_time_s)
             return
-        clipped_points, clipped_confidences = self._clip_points_to_corridor(
+        sampled_points, sampled_confidences = self._downsample_history_points(
             np.asarray(points_world_xy, dtype=np.float32),
             np.asarray(confidences, dtype=np.float32),
+        )
+        clipped_points, clipped_confidences = self._clip_points_to_corridor(
+            sampled_points,
+            sampled_confidences,
             corridor_polygons_xy,
         )
         if clipped_points.size == 0:
