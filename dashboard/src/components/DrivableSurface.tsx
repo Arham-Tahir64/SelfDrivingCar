@@ -109,8 +109,8 @@ export default function DrivableSurface() {
         rows,
         THREE.RGBAFormat,
       );
-      textureRef.current.magFilter = THREE.LinearFilter;
-      textureRef.current.minFilter = THREE.LinearFilter;
+      textureRef.current.magFilter = THREE.NearestFilter;
+      textureRef.current.minFilter = THREE.NearestFilter;
       textureRef.current.needsUpdate = true;
 
       const mat = mesh.material as THREE.MeshBasicMaterial;

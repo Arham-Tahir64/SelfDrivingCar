@@ -107,7 +107,13 @@ class PipelineRuntime:
                 bev_drivable_grid = None
                 if drivable_space is not None and ego_pose is not None:
                     try:
-                        bev_drivable_grid = bev_projector.project(drivable_space, ego_pose)
+                        bev_drivable_grid = bev_projector.project(
+                            drivable_space,
+                            ego_pose,
+                            camera_calibration=(
+                                bundle.metadata.get("camera_calibration", {}) or {}
+                            ).get("front_camera"),
+                        )
                     except Exception:
                         pass
 
