@@ -136,6 +136,36 @@ export interface PipelineLatency {
 
 export interface LidarPreview {
   points: number[][];
+  objects: LidarPanelObject[];
+  threat_ids: number[];
+  path_polyline_xy?: number[][];
+  forward_cone?: {
+    length_m: number;
+    half_angle_deg: number;
+  };
+  status?: {
+    mode: string;
+    degraded: boolean;
+    lidar_track_count: number;
+    confirmed_track_count: number;
+    point_count: number;
+  };
+}
+
+export interface LidarPanelObject {
+  track_id: number;
+  track_state: string;
+  object_class: string;
+  confidence: number;
+  source_modality: string;
+  footprint_xy: number[][];
+  centroid_xy: number[];
+  velocity_xy: number[];
+  speed_mps: number;
+  relevance_score: number;
+  threat_rank: number;
+  is_path_relevant: boolean;
+  ghost_xy?: number[];
 }
 
 export interface BEVDrivableGrid {

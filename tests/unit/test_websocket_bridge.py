@@ -4,14 +4,16 @@ import json
 
 import numpy as np
 
-from autonomy_demo.interfaces.enums import BehaviorState, LaneLineType, TopicName, TrafficLightState
+from autonomy_demo.interfaces.enums import BehaviorState, LaneLineType, ObjectClass, TopicName, TrackState, TrafficLightState
 from autonomy_demo.interfaces.types import (
+    AgentPrediction,
     ControlCommand,
     EgoPose,
     EgoTrajectory,
     LaneLine,
     LidarFrame,
     LocalMap,
+    ObjectDetection,
     StaticLaneSegment,
     TrafficLightDetection,
     Waypoint,
@@ -130,6 +132,55 @@ def _bev_grid(fill: int) -> dict[str, object]:
     }
 
 
+def _object_detection(
+    *,
+    track_id: int,
+    source_modality: str,
+    track_state: TrackState,
+    x: float,
+    y: float,
+    vx: float,
+    vy: float,
+) -> ObjectDetection:
+    return ObjectDetection(
+        track_id=track_id,
+        object_class=ObjectClass.VEHICLE,
+        world_bbox_3d=np.array(
+            [
+                [x - 1.0, y - 0.9, 0.0],
+                [x + 1.0, y - 0.9, 0.0],
+                [x + 1.0, y + 0.9, 0.0],
+                [x - 1.0, y + 0.9, 0.0],
+                [x - 1.0, y - 0.9, 1.6],
+                [x + 1.0, y - 0.9, 1.6],
+                [x + 1.0, y + 0.9, 1.6],
+                [x - 1.0, y + 0.9, 1.6],
+            ],
+            dtype=np.float32,
+        ),
+        velocity=np.array([vx, vy, 0.0], dtype=np.float32),
+        confidence=0.88,
+        track_state=track_state,
+        source_modality=source_modality,
+        source_sensor_ids=["lidar"],
+        position_estimate_kind="lidar_cluster" if source_modality == "lidar" else "fusion",
+    )
+
+
+def _agent_prediction(track_id: int, *, x: float, y: float, vx: float, vy: float) -> AgentPrediction:
+    return AgentPrediction(
+        track_id=track_id,
+        object_class=ObjectClass.VEHICLE,
+        predicted_trajectory=[
+            Waypoint(x=x + (vx * 0.3), y=y + (vy * 0.3), yaw=0.0, velocity=max(vx, 0.1), timestamp=0.3),
+            Waypoint(x=x + (vx * 0.6), y=y + (vy * 0.6), yaw=0.0, velocity=max(vx, 0.1), timestamp=0.6),
+            Waypoint(x=x + (vx * 0.9), y=y + (vy * 0.9), yaw=0.0, velocity=max(vx, 0.1), timestamp=0.9),
+        ],
+        confidence_by_step=[0.9, 0.82, 0.74],
+        covariance_by_step=None,
+    )
+
+
 def _publish_common(bus: InProcessEventBus) -> None:
     bus.publish(
         TopicName.SCENARIO_INFO.value,
@@ -143,6 +194,52 @@ def _publish_common(bus: InProcessEventBus) -> None:
     bus.publish(TopicName.MAP_LOCAL_MAP.value, _local_map())
     bus.publish(TopicName.VISUALIZATION_WORLD_LAYER.value, _world_layer(signature="sig-a"))
     bus.publish(TopicName.LOCALIZATION_EGO_POSE.value, _ego_pose())
+    bus.publish(
+        TopicName.PERCEPTION_STATUS.value,
+        {
+            "active_mode": "fused_v1",
+            "fallback_state": "fused",
+        },
+    )
+    bus.publish(
+        TopicName.PERCEPTION_DETECTIONS.value,
+        [
+            _object_detection(
+                track_id=7,
+                source_modality="lidar",
+                track_state=TrackState.CONFIRMED,
+                x=12.0,
+                y=0.4,
+                vx=4.0,
+                vy=0.0,
+            ),
+            _object_detection(
+                track_id=8,
+                source_modality="lidar",
+                track_state=TrackState.TENTATIVE,
+                x=18.0,
+                y=5.8,
+                vx=0.5,
+                vy=0.0,
+            ),
+            _object_detection(
+                track_id=17,
+                source_modality="camera",
+                track_state=TrackState.CONFIRMED,
+                x=10.0,
+                y=-2.0,
+                vx=2.0,
+                vy=0.0,
+            ),
+        ],
+    )
+    bus.publish(
+        TopicName.PREDICTION_AGENTS.value,
+        [
+            _agent_prediction(track_id=7, x=12.0, y=0.4, vx=4.0, vy=0.0),
+            _agent_prediction(track_id=8, x=18.0, y=5.8, vx=0.5, vy=0.0),
+        ],
+    )
     bus.publish(
         TopicName.CONTROL_VEHICLE_COMMAND.value,
         ControlCommand(throttle=0.2, steer=0.0, brake=0.0),
@@ -215,6 +312,17 @@ def test_bootstrap_envelope_merges_retained_dynamic_and_heavy_topics(monkeypatch
     assert "traffic_lights" in topics[TopicName.VISUALIZATION_WORLD_LAYER.value]
     assert TopicName.VISUALIZATION_LIDAR_PREVIEW.value in topics
     assert len(topics[TopicName.VISUALIZATION_LIDAR_PREVIEW.value]["points"]) == 300
+    lidar_preview = topics[TopicName.VISUALIZATION_LIDAR_PREVIEW.value]
+    assert len(lidar_preview["objects"]) == 2
+    assert {obj["track_id"] for obj in lidar_preview["objects"]} == {7, 8}
+    assert lidar_preview["threat_ids"] == [7]
+    threat_object = next(obj for obj in lidar_preview["objects"] if obj["track_id"] == 7)
+    assert threat_object["track_state"] == "CONFIRMED"
+    assert threat_object["is_path_relevant"] is True
+    assert threat_object["ghost_xy"] is not None
+    tentative_object = next(obj for obj in lidar_preview["objects"] if obj["track_id"] == 8)
+    assert tentative_object["track_state"] == "TENTATIVE"
+    assert tentative_object["threat_rank"] == 0
     assert TopicName.VISUALIZATION_BEV_DRIVABLE.value in topics
     assert envelope["ws_stats"]["topic_count"] >= 6
     assert envelope["ws_stats"]["topic_bytes"][TopicName.MAP_LOCAL_MAP.value] > 0
@@ -237,6 +345,7 @@ def test_register_queues_immediate_bootstrap_before_first_tick(monkeypatch) -> N
     assert envelope["sim_time_s"] == 0.0
     assert TopicName.SCENARIO_INFO.value in envelope["topics"]
     assert TopicName.VISUALIZATION_WORLD_LAYER.value in envelope["topics"]
+    assert TopicName.VISUALIZATION_LIDAR_PREVIEW.value in envelope["topics"]
 
 
 def test_world_layer_static_updates_only_when_signature_changes(monkeypatch) -> None:
@@ -296,3 +405,39 @@ def test_dynamic_frames_do_not_wait_for_heavy_topics(monkeypatch) -> None:
     latest_dynamic = queued[-1]
     assert latest_dynamic["message_kind"] == "dynamic_frame"
     assert TopicName.VISUALIZATION_BEV_DRIVABLE.value in latest_dynamic["topics"]
+
+
+def test_lidar_preview_marks_camera_only_mode_as_degraded(monkeypatch) -> None:
+    bus = InProcessEventBus()
+    bridge = WebSocketBridge()
+    bridge.attach(bus)
+    queued = _capture_envelopes(bridge)
+    _publish_common(bus)
+    bus.publish(
+        TopicName.PERCEPTION_STATUS.value,
+        {
+            "active_mode": "camera_v1",
+            "fallback_state": "camera_only",
+        },
+    )
+    bus.publish(
+        TopicName.PERCEPTION_DETECTIONS.value,
+        [
+            _object_detection(
+                track_id=20,
+                source_modality="camera",
+                track_state=TrackState.CONFIRMED,
+                x=10.0,
+                y=1.0,
+                vx=2.0,
+                vy=0.0,
+            )
+        ],
+    )
+
+    monkeypatch.setattr("autonomy_demo.visualization.websocket_bridge.time.monotonic", lambda: 44.0)
+    bridge.register(object())
+
+    lidar_preview = queued[-1]["topics"][TopicName.VISUALIZATION_LIDAR_PREVIEW.value]
+    assert lidar_preview["objects"] == []
+    assert lidar_preview["status"]["degraded"] is True

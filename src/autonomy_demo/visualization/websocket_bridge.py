@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import math
 import threading
 import time
 from typing import Any
@@ -85,6 +86,10 @@ _FAST_DYNAMIC_FPS = 8.0
 _HEAVY_DYNAMIC_FPS = 2.0
 _WAYPOINT_STRIDE = 2
 _WS_STATS_LOG_INTERVAL_S = 5.0
+_LIDAR_PANEL_RANGE_M = 50.0
+_LIDAR_FORWARD_CONE_LENGTH_M = 28.0
+_LIDAR_FORWARD_CONE_HALF_ANGLE_DEG = 18.0
+_LIDAR_THREAT_COUNT = 3
 
 
 def _stable_json(value: Any) -> str:
@@ -111,6 +116,12 @@ def _merge_topic(topics: dict[str, Any], topic: str, payload: Any) -> None:
 
 def _serialize_payload(payload: Any) -> Any:
     return serialize({"payload": payload}).get("payload")
+
+
+def _field(payload: Any, name: str, default: Any = None) -> Any:
+    if isinstance(payload, dict):
+        return payload.get(name, default)
+    return getattr(payload, name, default)
 
 
 def _encode_overlay_jpeg(frame_rgb: np.ndarray) -> str | None:
@@ -140,6 +151,249 @@ def _downsample_lidar(points_xyz: np.ndarray) -> list[list[float]]:
         return points_xyz.tolist()
     indices = np.linspace(0, count - 1, _LIDAR_MAX_POINTS, dtype=np.int32)
     return points_xyz[indices].tolist()
+
+
+def _world_to_ego_xy(world_xyz: np.ndarray | list[float], ego_pose: Any) -> np.ndarray | None:
+    if ego_pose is None:
+        return None
+    ego_xyz = np.asarray(getattr(ego_pose, "world_xyz", [0.0, 0.0, 0.0]), dtype=np.float32)
+    yaw = float(getattr(ego_pose, "yaw_rad", 0.0))
+    delta_xy = np.asarray(world_xyz, dtype=np.float32)[:2] - ego_xyz[:2]
+    rotation = np.array(
+        [
+            [math.cos(yaw), math.sin(yaw)],
+            [-math.sin(yaw), math.cos(yaw)],
+        ],
+        dtype=np.float32,
+    )
+    return rotation @ delta_xy
+
+
+def _distance_point_to_segment(point_xy: np.ndarray, start_xy: np.ndarray, end_xy: np.ndarray) -> float:
+    segment = end_xy - start_xy
+    length_sq = float(np.dot(segment, segment))
+    if length_sq <= 1e-6:
+        return float(np.linalg.norm(point_xy - start_xy))
+    t = float(np.clip(np.dot(point_xy - start_xy, segment) / length_sq, 0.0, 1.0))
+    projection = start_xy + (segment * t)
+    return float(np.linalg.norm(point_xy - projection))
+
+
+def _distance_to_polyline(point_xy: np.ndarray, polyline_xy: list[list[float]]) -> float:
+    if len(polyline_xy) < 2:
+        return abs(float(point_xy[1]))
+    best = float("inf")
+    for start, end in zip(polyline_xy[:-1], polyline_xy[1:]):
+        best = min(
+            best,
+            _distance_point_to_segment(
+                point_xy,
+                np.asarray(start, dtype=np.float32),
+                np.asarray(end, dtype=np.float32),
+            ),
+        )
+    return best
+
+
+def _centroid_xy_from_bbox(world_bbox_3d: Any) -> np.ndarray:
+    bbox = np.asarray(world_bbox_3d, dtype=np.float32)
+    if bbox.size == 0:
+        return np.zeros(2, dtype=np.float32)
+    return np.mean(bbox[:, :2], axis=0).astype(np.float32)
+
+
+def _ego_frame_footprint(world_bbox_3d: Any, ego_pose: Any) -> list[list[float]]:
+    bbox = np.asarray(world_bbox_3d, dtype=np.float32)
+    if bbox.shape[0] < 4:
+        return []
+    footprint: list[list[float]] = []
+    for corner in bbox[:4]:
+        ego_xy = _world_to_ego_xy(corner[:2], ego_pose)
+        if ego_xy is None:
+            continue
+        footprint.append([float(ego_xy[0]), float(ego_xy[1])])
+    return footprint
+
+
+def _ego_frame_velocity_xy(world_velocity: Any, ego_pose: Any) -> list[float]:
+    if ego_pose is None:
+        return [0.0, 0.0]
+    velocity = np.asarray(world_velocity, dtype=np.float32)
+    if velocity.size < 2:
+        return [0.0, 0.0]
+    yaw = float(getattr(ego_pose, "yaw_rad", 0.0))
+    rotation = np.array(
+        [
+            [math.cos(yaw), math.sin(yaw)],
+            [-math.sin(yaw), math.cos(yaw)],
+        ],
+        dtype=np.float32,
+    )
+    ego_velocity = rotation @ velocity[:2]
+    return [float(ego_velocity[0]), float(ego_velocity[1])]
+
+
+def _ego_path_polyline(trajectory: Any, ego_pose: Any) -> list[list[float]]:
+    if trajectory is None or ego_pose is None:
+        return []
+    polyline: list[list[float]] = []
+    for waypoint in _sample_waypoints(list(getattr(trajectory, "waypoints", []) or [])):
+        ego_xy = _world_to_ego_xy([getattr(waypoint, "x", 0.0), getattr(waypoint, "y", 0.0)], ego_pose)
+        if ego_xy is None:
+            continue
+        if float(ego_xy[0]) < -8.0 or abs(float(ego_xy[1])) > (_LIDAR_PANEL_RANGE_M * 0.75):
+            continue
+        polyline.append([float(ego_xy[0]), float(ego_xy[1])])
+    return polyline
+
+
+def _prediction_ghost_xy(prediction: Any, ego_pose: Any) -> list[float] | None:
+    if prediction is None or ego_pose is None:
+        return None
+    waypoints = list(getattr(prediction, "predicted_trajectory", []) or [])
+    if not waypoints:
+        return None
+    target_waypoint = waypoints[-1]
+    for waypoint in waypoints:
+        if float(getattr(waypoint, "timestamp", 0.0)) >= 0.6:
+            target_waypoint = waypoint
+            break
+    ego_xy = _world_to_ego_xy(
+        [getattr(target_waypoint, "x", 0.0), getattr(target_waypoint, "y", 0.0)],
+        ego_pose,
+    )
+    if ego_xy is None:
+        return None
+    return [float(ego_xy[0]), float(ego_xy[1])]
+
+
+def _lidar_panel_status(perception_status: Any, object_count: int, confirmed_count: int, point_count: int) -> dict[str, Any]:
+    active_mode = str(_field(perception_status, "active_mode", "unknown"))
+    fallback_state = str(_field(perception_status, "fallback_state", "unknown"))
+    degraded = fallback_state in {"camera_only", "bootstrap"}
+    return {
+        "mode": active_mode,
+        "degraded": degraded,
+        "lidar_track_count": int(object_count),
+        "confirmed_track_count": int(confirmed_count),
+        "point_count": int(point_count),
+    }
+
+
+def _serialize_lidar_preview(snapshot: dict[str, Any]) -> dict[str, Any] | None:
+    lidar_frame = snapshot.get(TopicName.SENSOR_LIDAR.value)
+    if lidar_frame is None or not hasattr(lidar_frame, "points_xyz"):
+        return None
+
+    ego_pose = snapshot.get(TopicName.LOCALIZATION_EGO_POSE.value)
+    detections = list(snapshot.get(TopicName.PERCEPTION_DETECTIONS.value) or [])
+    predictions = list(snapshot.get(TopicName.PREDICTION_AGENTS.value) or [])
+    prediction_by_track = {
+        int(getattr(prediction, "track_id", -1)): prediction
+        for prediction in predictions
+    }
+    path_polyline_xy = _ego_path_polyline(snapshot.get(TopicName.PLANNING_EGO_TRAJECTORY.value), ego_pose)
+
+    candidates: list[dict[str, Any]] = []
+    for detection in detections:
+        source_modality = str(getattr(detection, "source_modality", ""))
+        if source_modality not in {"lidar", "fused"}:
+            continue
+        track_state = str(getattr(getattr(detection, "track_state", None), "value", getattr(detection, "track_state", "")))
+        if track_state in {"LOST", "DELETED"}:
+            continue
+        footprint_xy = _ego_frame_footprint(getattr(detection, "world_bbox_3d", None), ego_pose)
+        if len(footprint_xy) < 4:
+            continue
+        centroid_world_xy = _centroid_xy_from_bbox(getattr(detection, "world_bbox_3d", None))
+        centroid_ego_xy = _world_to_ego_xy([float(centroid_world_xy[0]), float(centroid_world_xy[1])], ego_pose)
+        if centroid_ego_xy is None:
+            continue
+        forward_m = float(centroid_ego_xy[0])
+        lateral_m = float(centroid_ego_xy[1])
+        if forward_m < -10.0 or forward_m > (_LIDAR_PANEL_RANGE_M + 8.0) or abs(lateral_m) > (_LIDAR_PANEL_RANGE_M * 0.75):
+            continue
+        velocity_xy = _ego_frame_velocity_xy(getattr(detection, "velocity", [0.0, 0.0, 0.0]), ego_pose)
+        speed_mps = float(np.linalg.norm(np.asarray(velocity_xy, dtype=np.float32)))
+        path_distance_m = _distance_to_polyline(np.asarray([forward_m, lateral_m], dtype=np.float32), path_polyline_xy)
+        is_path_relevant = path_distance_m <= 3.0 and forward_m >= -3.0
+        forward_term = max(0.0, 1.0 - min(max(forward_m, 0.0), 45.0) / 45.0)
+        lateral_term = max(0.0, 1.0 - min(abs(lateral_m), 12.0) / 12.0)
+        path_term = max(0.0, 1.0 - min(path_distance_m, 4.0) / 4.0)
+        speed_term = min(speed_mps, 12.0) / 12.0
+        rear_penalty = 0.35 if forward_m < 0.0 else 0.0
+        relevance_score = max(
+            0.0,
+            (0.42 * forward_term) + (0.38 * path_term) + (0.12 * lateral_term) + (0.08 * speed_term) - rear_penalty,
+        )
+        candidates.append(
+            {
+                "track_id": int(getattr(detection, "track_id", -1)),
+                "track_state": track_state,
+                "object_class": getattr(getattr(detection, "object_class", None), "value", getattr(detection, "object_class", "")),
+                "confidence": float(getattr(detection, "confidence", 0.0)),
+                "source_modality": source_modality,
+                "footprint_xy": footprint_xy,
+                "centroid_xy": [forward_m, lateral_m],
+                "velocity_xy": velocity_xy,
+                "speed_mps": speed_mps,
+                "relevance_score": relevance_score,
+                "is_path_relevant": is_path_relevant,
+                "_prediction": prediction_by_track.get(int(getattr(detection, "track_id", -1))),
+            }
+        )
+
+    confirmed = [candidate for candidate in candidates if candidate["track_state"] == "CONFIRMED"]
+    ranked_confirmed = sorted(
+        confirmed,
+        key=lambda candidate: (-float(candidate["relevance_score"]), float(candidate["centroid_xy"][0] < 0.0), abs(float(candidate["centroid_xy"][1]))),
+    )
+    threat_ids = [int(candidate["track_id"]) for candidate in ranked_confirmed[:_LIDAR_THREAT_COUNT] if candidate["relevance_score"] > 0.22]
+    threat_index = {track_id: rank for rank, track_id in enumerate(threat_ids, start=1)}
+
+    objects: list[dict[str, Any]] = []
+    for candidate in candidates:
+        track_id = int(candidate["track_id"])
+        if track_id in threat_index:
+            ghost_xy = _prediction_ghost_xy(candidate["_prediction"], ego_pose)
+        else:
+            ghost_xy = None
+        objects.append(
+            {
+                "track_id": track_id,
+                "track_state": candidate["track_state"],
+                "object_class": candidate["object_class"],
+                "confidence": candidate["confidence"],
+                "source_modality": candidate["source_modality"],
+                "footprint_xy": candidate["footprint_xy"],
+                "centroid_xy": candidate["centroid_xy"],
+                "velocity_xy": candidate["velocity_xy"],
+                "speed_mps": candidate["speed_mps"],
+                "relevance_score": candidate["relevance_score"],
+                "threat_rank": int(threat_index.get(track_id, 0)),
+                "is_path_relevant": bool(candidate["is_path_relevant"]),
+                "ghost_xy": ghost_xy,
+            }
+        )
+
+    point_sample = _downsample_lidar(np.asarray(lidar_frame.points_xyz, dtype=np.float32))
+    perception_status = snapshot.get(TopicName.PERCEPTION_STATUS.value)
+    return {
+        "points": point_sample,
+        "objects": objects,
+        "threat_ids": threat_ids,
+        "path_polyline_xy": path_polyline_xy,
+        "forward_cone": {
+            "length_m": _LIDAR_FORWARD_CONE_LENGTH_M,
+            "half_angle_deg": _LIDAR_FORWARD_CONE_HALF_ANGLE_DEG,
+        },
+        "status": _lidar_panel_status(
+            perception_status,
+            object_count=len(objects),
+            confirmed_count=len(confirmed),
+            point_count=len(point_sample),
+        ),
+    }
 
 
 def _serialize_local_map_for_dashboard(local_map: Any) -> dict[str, Any] | None:
@@ -351,11 +605,9 @@ class WebSocketBridge:
             if jpeg_b64:
                 heavy[TopicName.VISUALIZATION_CAMERA_OVERLAY.value] = jpeg_b64
 
-        lidar_frame = snapshot.get(TopicName.SENSOR_LIDAR.value)
-        if lidar_frame is not None and hasattr(lidar_frame, "points_xyz"):
-            heavy[TopicName.VISUALIZATION_LIDAR_PREVIEW.value] = {
-                "points": _downsample_lidar(lidar_frame.points_xyz),
-            }
+        lidar_preview = _serialize_lidar_preview(snapshot)
+        if lidar_preview is not None:
+            heavy[TopicName.VISUALIZATION_LIDAR_PREVIEW.value] = lidar_preview
 
         bev_grid = _serialize_bev_grid(snapshot.get(TopicName.VISUALIZATION_BEV_DRIVABLE.value))
         if bev_grid is not None:
