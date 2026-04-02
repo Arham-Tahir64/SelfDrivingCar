@@ -110,11 +110,18 @@ class PipelineRuntime:
 
                 bev_drivable_grid = None
                 road_corridor = None
+                world_layer = None
                 try:
                     road_corridor = bev_projector.build_route_corridor(
                         local_map,
                         ego_pose,
                         route_plan=getattr(self.motion_planner, "route_plan", None),
+                    )
+                    world_layer = bev_projector.build_world_layer(
+                        local_map,
+                        ego_pose,
+                        route_plan=getattr(self.motion_planner, "route_plan", None),
+                        route_lane_ids={strip["lane_id"] for strip in road_corridor.get("strips", [])},
                     )
                     if drivable_space is not None and ego_pose is not None:
                         world_points_xy, confidences = bev_projector.project_world_points(
@@ -184,6 +191,11 @@ class PipelineRuntime:
                     self.context.event_bus.publish(
                         TopicName.VISUALIZATION_ROAD_CORRIDOR.value,
                         {"strips": list(road_corridor.get("strips", []))},
+                    )
+                if world_layer is not None:
+                    self.context.event_bus.publish(
+                        TopicName.VISUALIZATION_WORLD_LAYER.value,
+                        world_layer,
                     )
 
                 # Publish per-tick latency for the dashboard

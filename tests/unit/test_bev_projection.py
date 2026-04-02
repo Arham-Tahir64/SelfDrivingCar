@@ -274,3 +274,106 @@ def test_world_history_clips_out_of_corridor_points() -> None:
     assert occupied.size > 0
     col_values = occupied[:, 1]
     assert np.all(col_values < crop["cols"] - 8)
+
+
+def test_world_layer_builds_roads_markers_and_outer_sidewalks() -> None:
+    projector = BEVDrivableProjector()
+    lane_a = _static_lane("lane_a", x0=-10.0, x1=30.0, center_y=0.0, successors=["lane_c"])
+    lane_b = _static_lane("lane_b", x0=-10.0, x1=30.0, center_y=3.5)
+    local_map = _local_map([lane_a, lane_b])
+
+    payload = projector.build_world_layer(
+        local_map,
+        EgoPose(
+            world_xyz=np.array([0.0, 0.0, 0.0], dtype=np.float32),
+            yaw_rad=0.0,
+            speed_mps=0.0,
+            acceleration_mps2=0.0,
+            current_lane_id="lane_a",
+            frenet_s=0.0,
+            frenet_d=0.0,
+            heading_error_rad=0.0,
+        ),
+        route_lane_ids={"lane_a"},
+    )
+
+    assert len(payload["roads"]) == 2
+    assert len(payload["lane_markers"]) == 1
+    assert len(payload["sidewalks"]) == 2
+    route_roads = [road for road in payload["roads"] if road["is_route"]]
+    assert [road["lane_id"] for road in route_roads] == ["lane_a"]
+    route_markers = [marker for marker in payload["lane_markers"] if marker["is_route"]]
+    assert len(route_markers) == 1
+    adjacent_roads = [road for road in payload["roads"] if road["visibility_class"] == "adjacent"]
+    assert [road["lane_id"] for road in adjacent_roads] == ["lane_b"]
+
+
+def test_world_layer_marks_closed_lanes_without_dropping_geometry() -> None:
+    projector = BEVDrivableProjector()
+    lane = _static_lane("lane_001", x0=-10.0, x1=30.0)
+    local_map = _local_map([lane])
+    local_map.closed_lanes = ["lane_001"]
+
+    payload = projector.build_world_layer(local_map, _ego_pose(), route_lane_ids={"lane_001"})
+
+    assert len(payload["roads"]) == 1
+    assert payload["roads"][0]["is_closed"] is True
+    assert len(payload["sidewalks"]) == 2
+
+
+def test_world_layer_drops_far_parallel_background_lanes() -> None:
+    projector = BEVDrivableProjector()
+    route_lane = _static_lane("lane_route", x0=-10.0, x1=30.0, center_y=0.0)
+    adjacent_lane = _static_lane("lane_adjacent", x0=-10.0, x1=30.0, center_y=3.5)
+    far_lane = _static_lane("lane_far", x0=-10.0, x1=30.0, center_y=14.0)
+
+    payload = projector.build_world_layer(
+        _local_map([route_lane, adjacent_lane, far_lane]),
+        EgoPose(
+            world_xyz=np.array([0.0, 0.0, 0.0], dtype=np.float32),
+            yaw_rad=0.0,
+            speed_mps=0.0,
+            acceleration_mps2=0.0,
+            current_lane_id="lane_route",
+            frenet_s=0.0,
+            frenet_d=0.0,
+            heading_error_rad=0.0,
+        ),
+        route_lane_ids={"lane_route"},
+    )
+
+    road_ids = {road["lane_id"] for road in payload["roads"]}
+    assert "lane_route" in road_ids
+    assert "lane_adjacent" in road_ids
+    assert "lane_far" not in road_ids
+    marker_lane_classes = {marker["visibility_class"] for marker in payload["lane_markers"]}
+    assert "background" not in marker_lane_classes
+
+
+def test_world_layer_merges_junction_lanes_into_single_patch() -> None:
+    projector = BEVDrivableProjector()
+    route_lane = _static_lane("lane_route", x0=-10.0, x1=5.0, center_y=0.0)
+    junction_a = _static_lane("junction_a", x0=0.0, x1=12.0, center_y=0.0, is_junction=True)
+    junction_b = _static_lane("junction_b", x0=0.0, x1=12.0, center_y=2.5, is_junction=True)
+    crossing = _static_lane("junction_cross", x0=-2.0, x1=10.0, center_y=6.0, is_junction=True)
+
+    payload = projector.build_world_layer(
+        _local_map([route_lane, junction_a, junction_b, crossing]),
+        EgoPose(
+            world_xyz=np.array([1.0, 0.0, 0.0], dtype=np.float32),
+            yaw_rad=0.0,
+            speed_mps=0.0,
+            acceleration_mps2=0.0,
+            current_lane_id="lane_route",
+            frenet_s=0.0,
+            frenet_d=0.0,
+            heading_error_rad=0.0,
+        ),
+        route_lane_ids={"lane_route", "junction_a"},
+    )
+
+    junction_patches = [road for road in payload["roads"] if road["is_junction_patch"]]
+    assert 1 <= len(junction_patches) <= 2
+    assert len(junction_patches) < 3
+    assert all(patch["visibility_class"] in {"route", "adjacent"} for patch in junction_patches)
+    assert all(marker["visibility_class"] != "background" for marker in payload["lane_markers"])

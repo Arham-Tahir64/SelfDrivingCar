@@ -12,7 +12,7 @@ import PredictedPaths from "./PredictedPaths";
 import TrajectoryCandidates from "./TrajectoryCandidates";
 import TrafficLights from "./TrafficLights";
 import DrivableSurface from "./DrivableSurface";
-import RoadCorridorSurface from "./RoadCorridorSurface";
+import WorldLayerSurface from "./WorldLayerSurface";
 
 const CAMERA_OFFSET_LOCAL = new THREE.Vector3(-18, 20, 0);
 const LOOK_AHEAD_LOCAL = new THREE.Vector3(22, 0, 0);
@@ -102,7 +102,7 @@ export default function BEVScene() {
       <directionalLight position={[50, 100, 50]} intensity={1.0} />
       <CameraController />
       <Ground />
-      <RoadCorridorSurface />
+      <WorldLayerSurface />
       <DrivableSurface />
       <EgoVehicle />
       <LaneLines />

@@ -9,7 +9,7 @@ import { worldToScene, yawToScene, dampAngle } from "../utils/scene";
 const DRIVABLE_R = 0;
 const DRIVABLE_G = 220;
 const DRIVABLE_B = 90;
-const MAX_ALPHA = 140; // semi-transparent
+const MAX_ALPHA = 70; // keep the learned signal subtle over the structured road layer
 
 const POSITION_SMOOTHING = 0.22;
 const ROTATION_SMOOTHING = 0.18;

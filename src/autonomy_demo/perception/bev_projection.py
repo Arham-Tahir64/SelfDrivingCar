@@ -20,6 +20,14 @@ _CROP_Y_MAX_M = 15.0
 _HISTORY_DECAY_S = 4.0
 _HISTORY_PRUNE_DISTANCE_M = 90.0
 _MAX_HISTORY_SAMPLES = 2200
+_SIDEWALK_BAND_WIDTH_M = 2.0
+_NAV_ROUTE_RADIUS_M = 55.0
+_NAV_BACKGROUND_RADIUS_M = 28.0
+_NAV_ROUTE_NEIGHBOR_DISTANCE_M = 4.6
+_NAV_BACKGROUND_ROUTE_DISTANCE_M = 10.0
+_NAV_JUNCTION_RADIUS_M = 22.0
+_NAV_FORWARD_BIAS_M = 45.0
+_NAV_REAR_BIAS_M = 18.0
 
 _DEFAULT_FRONT_CAMERA_CALIBRATION = {
     "fov_deg": 90.0,
@@ -69,6 +77,8 @@ class BEVDrivableProjector:
         self._history: dict[tuple[int, int], tuple[float, float]] = {}
         self._corridor_cache_key: tuple[str, ...] | None = None
         self._corridor_cache_payload: dict[str, Any] | None = None
+        self._world_layer_cache_key: tuple[str, ...] | None = None
+        self._world_layer_cache_payload: dict[str, Any] | None = None
 
     def _normalise_calibration(
         self,
@@ -316,6 +326,361 @@ class BEVDrivableProjector:
         if len(left) >= 2 and len(right) >= 2:
             return left, right
         return self._lane_boundaries_from_centerline(segment)
+
+    def _polyline_signature(self, polyline_world: np.ndarray) -> tuple[tuple[float, float], ...]:
+        quantized = tuple(
+            (round(float(point[0]), 1), round(float(point[1]), 1))
+            for point in np.asarray(polyline_world, dtype=np.float32)
+        )
+        reversed_quantized = tuple(reversed(quantized))
+        return quantized if quantized <= reversed_quantized else reversed_quantized
+
+    def _boundary_registry_entry(
+        self,
+        *,
+        lane_id: str,
+        side: str,
+        centerline_world: np.ndarray,
+        boundary_world: np.ndarray,
+        visibility_class: str,
+        is_junction: bool,
+    ) -> dict[str, Any]:
+        usable = min(len(centerline_world), len(boundary_world))
+        return {
+            "lane_id": lane_id,
+            "side": side,
+            "visibility_class": str(visibility_class),
+            "is_junction": bool(is_junction),
+            "centerline_world": np.asarray(centerline_world[:usable], dtype=np.float32),
+            "boundary_world": np.asarray(boundary_world[:usable], dtype=np.float32),
+        }
+
+    def _sidewalk_polygon_world(self, entry: dict[str, Any]) -> np.ndarray:
+        centerline = np.asarray(entry["centerline_world"], dtype=np.float32)
+        boundary = np.asarray(entry["boundary_world"], dtype=np.float32)
+        usable = min(len(centerline), len(boundary))
+        if usable < 2:
+            return np.zeros((0, 3), dtype=np.float32)
+        centerline = centerline[:usable]
+        boundary = boundary[:usable]
+        outward = boundary[:, :2] - centerline[:, :2]
+        outward_norm = np.linalg.norm(outward, axis=1, keepdims=True)
+        outward_unit = outward / np.clip(outward_norm, 1e-3, None)
+        outer_edge_xy = boundary[:, :2] + (outward_unit * _SIDEWALK_BAND_WIDTH_M)
+        outer_edge_z = boundary[:, 2:3]
+        outer_edge = np.hstack([outer_edge_xy, outer_edge_z])
+        return np.vstack([boundary, outer_edge[::-1]]).astype(np.float32)
+
+    def _segment_heading_rad(self, segment: StaticLaneSegment) -> float:
+        centerline = np.asarray(segment.centerline_world, dtype=np.float32)
+        if len(centerline) < 2:
+            return 0.0
+        delta = centerline[-1, :2] - centerline[0, :2]
+        return float(math.atan2(float(delta[1]), float(delta[0])))
+
+    def _normalize_angle(self, angle_rad: float) -> float:
+        return float((float(angle_rad) + math.pi) % (2.0 * math.pi) - math.pi)
+
+    def _centerline_distance_xy(self, centerline: np.ndarray, point_xy: np.ndarray) -> float:
+        centerline_xy = np.asarray(centerline, dtype=np.float32)[:, :2]
+        if len(centerline_xy) == 0:
+            return float("inf")
+        return float(np.min(np.linalg.norm(centerline_xy - point_xy[None, :], axis=1)))
+
+    def _segment_centroid_xy(self, segment: StaticLaneSegment) -> np.ndarray:
+        centerline = np.asarray(segment.centerline_world, dtype=np.float32)
+        if len(centerline) == 0:
+            return np.zeros(2, dtype=np.float32)
+        return np.mean(centerline[:, :2], axis=0).astype(np.float32)
+
+    def _route_segment_lookup(
+        self,
+        lane_lookup: dict[str, StaticLaneSegment],
+        route_lane_ids: set[str],
+    ) -> dict[str, StaticLaneSegment]:
+        return {lane_id: lane_lookup[lane_id] for lane_id in route_lane_ids if lane_id in lane_lookup}
+
+    def _route_distance_for_segment(
+        self,
+        segment: StaticLaneSegment,
+        route_segments: dict[str, StaticLaneSegment],
+    ) -> float:
+        centerline = np.asarray(segment.centerline_world, dtype=np.float32)
+        if not route_segments or len(centerline) == 0:
+            return float("inf")
+        centerline_xy = centerline[:, :2]
+        best = float("inf")
+        for route_segment in route_segments.values():
+            route_xy = np.asarray(route_segment.centerline_world, dtype=np.float32)[:, :2]
+            if len(route_xy) == 0:
+                continue
+            deltas = centerline_xy[:, None, :] - route_xy[None, :, :]
+            best = min(best, float(np.min(np.linalg.norm(deltas, axis=2))))
+        return best
+
+    def _road_window_score(
+        self,
+        segment: StaticLaneSegment,
+        ego_pose: EgoPose,
+    ) -> tuple[bool, float]:
+        centerline = np.asarray(segment.centerline_world, dtype=np.float32)
+        if len(centerline) == 0:
+            return False, float("inf")
+        yaw = float(ego_pose.yaw_rad)
+        cos_yaw = math.cos(yaw)
+        sin_yaw = math.sin(yaw)
+        rotation_world_to_ego = np.array(
+            [[cos_yaw, sin_yaw], [-sin_yaw, cos_yaw]],
+            dtype=np.float32,
+        )
+        ego_xy = np.asarray(ego_pose.world_xyz[:2], dtype=np.float32)
+        centerline_local = (centerline[:, :2] - ego_xy) @ rotation_world_to_ego.T
+        forward = centerline_local[:, 0]
+        lateral = centerline_local[:, 1]
+        in_window = np.any(
+            (forward >= -_NAV_REAR_BIAS_M)
+            & (forward <= _NAV_FORWARD_BIAS_M)
+            & (np.abs(lateral) <= _CROP_Y_MAX_M + 5.0)
+        )
+        return bool(in_window), float(np.min(np.linalg.norm(centerline_local, axis=1)))
+
+    def _visibility_rank(self, visibility_class: str) -> int:
+        return {"background": 0, "adjacent": 1, "route": 2}.get(str(visibility_class), 0)
+
+    def _classify_segment_visibility(
+        self,
+        segment: StaticLaneSegment,
+        *,
+        ego_pose: EgoPose,
+        route_segments: dict[str, StaticLaneSegment],
+        route_lane_ids: set[str],
+    ) -> str | None:
+        if segment.lane_id in route_lane_ids:
+            return "route"
+        in_window, ego_distance = self._road_window_score(segment, ego_pose)
+        if not in_window:
+            return None
+        if ego_distance > _NAV_ROUTE_RADIUS_M:
+            return None
+        route_distance = self._route_distance_for_segment(segment, route_segments)
+        heading = self._segment_heading_rad(segment)
+        heading_best = min(
+            (
+                abs(self._normalize_angle(heading - self._segment_heading_rad(route_segment)))
+                for route_segment in route_segments.values()
+            ),
+            default=math.pi,
+        )
+        if route_distance <= _NAV_ROUTE_NEIGHBOR_DISTANCE_M and heading_best <= 0.5:
+            return "adjacent"
+        if segment.is_junction and ego_distance <= _NAV_JUNCTION_RADIUS_M and route_distance <= 12.0:
+            return "adjacent"
+        if ego_distance <= _NAV_BACKGROUND_RADIUS_M and route_distance <= _NAV_BACKGROUND_ROUTE_DISTANCE_M:
+            return "background"
+        return None
+
+    def _convex_hull_xy(self, points_xy: np.ndarray) -> np.ndarray:
+        unique = sorted({(float(point[0]), float(point[1])) for point in np.asarray(points_xy, dtype=np.float32)})
+        if len(unique) <= 2:
+            return np.asarray(unique, dtype=np.float32)
+
+        def _cross(o: tuple[float, float], a: tuple[float, float], b: tuple[float, float]) -> float:
+            return ((a[0] - o[0]) * (b[1] - o[1])) - ((a[1] - o[1]) * (b[0] - o[0]))
+
+        lower: list[tuple[float, float]] = []
+        for point in unique:
+            while len(lower) >= 2 and _cross(lower[-2], lower[-1], point) <= 0.0:
+                lower.pop()
+            lower.append(point)
+        upper: list[tuple[float, float]] = []
+        for point in reversed(unique):
+            while len(upper) >= 2 and _cross(upper[-2], upper[-1], point) <= 0.0:
+                upper.pop()
+            upper.append(point)
+        hull = lower[:-1] + upper[:-1]
+        return np.asarray(hull, dtype=np.float32)
+
+    def _junction_patch_payload(
+        self,
+        *,
+        roads: list[dict[str, Any]],
+        visibility_class: str,
+        lane_ids: list[str],
+    ) -> dict[str, Any] | None:
+        if not roads:
+            return None
+        all_points = []
+        for road in roads:
+            all_points.extend(road["polygon_world"])
+        polygon_world = np.asarray(all_points, dtype=np.float32)
+        if len(polygon_world) < 3:
+            return None
+        hull_xy = self._convex_hull_xy(polygon_world[:, :2])
+        if len(hull_xy) < 3:
+            return None
+        z_mean = float(np.mean(polygon_world[:, 2])) if polygon_world.shape[1] >= 3 else 0.0
+        hull_world = np.column_stack(
+            [
+                hull_xy[:, 0],
+                hull_xy[:, 1],
+                np.full(hull_xy.shape[0], z_mean, dtype=np.float32),
+            ]
+        ).astype(np.float32)
+        centerlines = []
+        is_route = False
+        is_closed = False
+        for road in roads:
+            centerlines.extend(road.get("centerline_world", []))
+            is_route = is_route or bool(road.get("is_route", False))
+            is_closed = is_closed or bool(road.get("is_closed", False))
+        return {
+            "lane_id": "junction:" + "|".join(sorted(lane_ids)),
+            "polygon_world": hull_world.tolist(),
+            "centerline_world": centerlines,
+            "is_route": is_route,
+            "is_junction": True,
+            "is_junction_patch": True,
+            "is_closed": is_closed,
+            "visibility_class": visibility_class,
+        }
+
+    def build_world_layer(
+        self,
+        local_map: LocalMap | None,
+        ego_pose: EgoPose | None,
+        *,
+        route_plan: RoutePlan | None = None,
+        route_lane_ids: set[str] | None = None,
+    ) -> dict[str, Any]:
+        if local_map is None or ego_pose is None or not local_map.static_lanes:
+            return {"signature": "", "roads": [], "lane_markers": [], "sidewalks": []}
+        if route_lane_ids is None:
+            corridor = self.build_route_corridor(local_map, ego_pose, route_plan=route_plan)
+            route_lane_ids = {strip["lane_id"] for strip in corridor.get("strips", [])}
+
+        lane_lookup = {lane.lane_id: lane for lane in local_map.static_lanes}
+        ordered_lane_ids = tuple(sorted(lane_lookup.keys()))
+        ordered_route_lane_ids = tuple(sorted(lane_id for lane_id in route_lane_ids if lane_id in lane_lookup))
+        ordered_closed_lane_ids = tuple(sorted(str(lane_id) for lane_id in local_map.closed_lanes))
+        ego_cache_anchor = (
+            int(round(float(ego_pose.world_xyz[0]) / 4.0)),
+            int(round(float(ego_pose.world_xyz[1]) / 4.0)),
+            str(ego_pose.current_lane_id),
+        )
+        cache_key = (
+            ordered_lane_ids
+            + ("::route::",)
+            + ordered_route_lane_ids
+            + ("::closed::",)
+            + ordered_closed_lane_ids
+            + ("::ego::",)
+            + ego_cache_anchor
+        )
+        if cache_key == self._world_layer_cache_key and self._world_layer_cache_payload is not None:
+            return self._world_layer_cache_payload
+
+        route_segments = self._route_segment_lookup(lane_lookup, route_lane_ids)
+        roads: list[dict[str, Any]] = []
+        boundary_registry: dict[tuple[tuple[float, float], ...], list[dict[str, Any]]] = {}
+        closed_lanes = set(local_map.closed_lanes)
+        junction_roads_by_visibility: dict[str, list[dict[str, Any]]] = {"route": [], "adjacent": [], "background": []}
+        junction_lane_ids_by_visibility: dict[str, list[str]] = {"route": [], "adjacent": [], "background": []}
+        for lane in local_map.static_lanes:
+            visibility_class = self._classify_segment_visibility(
+                lane,
+                ego_pose=ego_pose,
+                route_segments=route_segments,
+                route_lane_ids=route_lane_ids,
+            )
+            if visibility_class is None:
+                continue
+            centerline = np.asarray(lane.centerline_world, dtype=np.float32)
+            left_boundary, right_boundary = self._lane_boundaries(lane)
+            if len(left_boundary) < 2 or len(right_boundary) < 2:
+                continue
+            polygon_world = np.vstack([left_boundary, right_boundary[::-1]])
+            road_payload = {
+                "lane_id": lane.lane_id,
+                "polygon_world": polygon_world.tolist(),
+                "centerline_world": centerline.tolist(),
+                "is_route": visibility_class == "route",
+                "is_junction": bool(lane.is_junction),
+                "is_junction_patch": False,
+                "is_closed": lane.lane_id in closed_lanes,
+                "visibility_class": visibility_class,
+            }
+            if lane.is_junction:
+                junction_roads_by_visibility[visibility_class].append(road_payload)
+                junction_lane_ids_by_visibility[visibility_class].append(lane.lane_id)
+            else:
+                roads.append(road_payload)
+            for side, boundary in (("left", left_boundary), ("right", right_boundary)):
+                signature = self._polyline_signature(boundary)
+                boundary_registry.setdefault(signature, []).append(
+                    self._boundary_registry_entry(
+                        lane_id=lane.lane_id,
+                        side=side,
+                        centerline_world=centerline,
+                        boundary_world=boundary,
+                        visibility_class=visibility_class,
+                        is_junction=lane.is_junction,
+                    )
+                )
+
+        for visibility_class, junction_roads in junction_roads_by_visibility.items():
+            patch = self._junction_patch_payload(
+                roads=junction_roads,
+                visibility_class=visibility_class,
+                lane_ids=junction_lane_ids_by_visibility[visibility_class],
+            )
+            if patch is not None:
+                roads.append(patch)
+
+        lane_markers: list[dict[str, Any]] = []
+        sidewalks: list[dict[str, Any]] = []
+        for index, (_signature, entries) in enumerate(boundary_registry.items()):
+            visibility_class = max(
+                (str(entry["visibility_class"]) for entry in entries),
+                key=self._visibility_rank,
+            )
+            if len(entries) >= 2:
+                if visibility_class == "background" or any(bool(entry["is_junction"]) for entry in entries):
+                    continue
+                boundary_world = np.asarray(entries[0]["boundary_world"], dtype=np.float32)
+                lane_markers.append(
+                    {
+                        "marker_id": f"marker:{index}",
+                        "polyline_world": boundary_world.tolist(),
+                        "is_route": visibility_class == "route",
+                        "visibility_class": visibility_class,
+                    }
+                )
+                continue
+            if visibility_class == "background":
+                continue
+            sidewalk_polygon = self._sidewalk_polygon_world(entries[0])
+            if len(sidewalk_polygon) < 3:
+                continue
+            boundary_world = np.asarray(entries[0]["boundary_world"], dtype=np.float32)
+            sidewalks.append(
+                {
+                    "sidewalk_id": f"sidewalk:{index}",
+                    "polygon_world": sidewalk_polygon.tolist(),
+                    "edge_world": boundary_world.tolist(),
+                    "is_route_adjacent": visibility_class == "route",
+                    "visibility_class": visibility_class,
+                }
+            )
+
+        payload = {
+            "signature": "|".join(str(part) for part in cache_key),
+            "roads": roads,
+            "lane_markers": lane_markers,
+            "sidewalks": sidewalks,
+        }
+        self._world_layer_cache_key = cache_key
+        self._world_layer_cache_payload = payload
+        return payload
 
     def _route_plan_window(
         self,

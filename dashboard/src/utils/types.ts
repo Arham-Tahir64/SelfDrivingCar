@@ -161,6 +161,39 @@ export interface RoadCorridorPayload {
   strips: RoadCorridorStrip[];
 }
 
+export interface WorldRoad {
+  lane_id: string;
+  polygon_world: number[][];
+  centerline_world: number[][];
+  is_route: boolean;
+  visibility_class?: "route" | "adjacent" | "background";
+  is_junction?: boolean;
+  is_junction_patch?: boolean;
+  is_closed?: boolean;
+}
+
+export interface WorldLaneMarker {
+  marker_id: string;
+  polyline_world: number[][];
+  is_route: boolean;
+  visibility_class?: "route" | "adjacent" | "background";
+}
+
+export interface WorldSidewalk {
+  sidewalk_id: string;
+  polygon_world: number[][];
+  edge_world: number[][];
+  is_route_adjacent?: boolean;
+  visibility_class?: "route" | "adjacent" | "background";
+}
+
+export interface WorldLayerPayload {
+  signature: string;
+  roads: WorldRoad[];
+  lane_markers: WorldLaneMarker[];
+  sidewalks: WorldSidewalk[];
+}
+
 export interface PipelineFrame {
   tick_id: number;
   sim_time_s: number;
@@ -179,5 +212,6 @@ export interface PipelineFrame {
   "visualization/lidar_preview"?: LidarPreview;
   "visualization/bev_drivable"?: BEVDrivableGrid;
   "visualization/road_corridor"?: RoadCorridorPayload;
+  "visualization/world_layer"?: WorldLayerPayload;
   "pipeline/latency"?: PipelineLatency;
 }

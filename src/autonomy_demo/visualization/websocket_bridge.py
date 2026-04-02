@@ -31,6 +31,7 @@ _WS_TOPICS = frozenset(
         TopicName.VISUALIZATION_CAMERA_OVERLAY.value,
         TopicName.VISUALIZATION_BEV_DRIVABLE.value,
         TopicName.VISUALIZATION_ROAD_CORRIDOR.value,
+        TopicName.VISUALIZATION_WORLD_LAYER.value,
         TopicName.SENSOR_LIDAR.value,
         TopicName.PIPELINE_LATENCY.value,
     }
