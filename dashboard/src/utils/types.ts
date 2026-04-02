@@ -225,3 +225,18 @@ export interface PipelineFrame {
   "visualization/world_layer"?: WorldLayerPayload;
   "pipeline/latency"?: PipelineLatency;
 }
+
+export interface WebSocketStats {
+  message_kind: "bootstrap" | "static_update" | "dynamic_frame";
+  total_bytes: number;
+  topic_count: number;
+  topic_bytes: Record<string, number>;
+}
+
+export interface WebSocketEnvelope {
+  message_kind: "bootstrap" | "static_update" | "dynamic_frame";
+  tick_id: number;
+  sim_time_s: number;
+  topics: Partial<PipelineFrame>;
+  ws_stats?: WebSocketStats;
+}
