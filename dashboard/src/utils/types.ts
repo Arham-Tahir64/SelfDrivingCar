@@ -187,11 +187,21 @@ export interface WorldSidewalk {
   visibility_class?: "route" | "adjacent" | "background";
 }
 
+export interface WorldTrafficLight {
+  actor_id: number;
+  world_xyz: number[];
+  yaw_deg: number;
+  state: string;
+  confidence: number;
+  visibility_class?: "route" | "adjacent" | "background";
+}
+
 export interface WorldLayerPayload {
   signature: string;
   roads: WorldRoad[];
   lane_markers: WorldLaneMarker[];
   sidewalks: WorldSidewalk[];
+  traffic_lights: WorldTrafficLight[];
 }
 
 export interface PipelineFrame {

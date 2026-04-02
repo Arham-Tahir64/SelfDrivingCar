@@ -2,7 +2,16 @@ from __future__ import annotations
 
 import numpy as np
 
-from autonomy_demo.interfaces.types import DrivableSpaceMask, EgoPose, LocalMap, StaticLaneSegment, RoutePlan, RouteWaypoint
+from autonomy_demo.interfaces.enums import TrafficLightState
+from autonomy_demo.interfaces.types import (
+    DrivableSpaceMask,
+    EgoPose,
+    LocalMap,
+    RoutePlan,
+    RouteWaypoint,
+    StaticLaneSegment,
+    TrafficLightDetection,
+)
 from autonomy_demo.perception.bev_projection import BEVDrivableProjector, GRID_SIZE
 
 
@@ -377,3 +386,44 @@ def test_world_layer_merges_junction_lanes_into_single_patch() -> None:
     assert len(junction_patches) < 3
     assert all(patch["visibility_class"] in {"route", "adjacent"} for patch in junction_patches)
     assert all(marker["visibility_class"] != "background" for marker in payload["lane_markers"])
+
+
+def test_world_layer_merges_live_traffic_light_state_onto_stable_anchor() -> None:
+    projector = BEVDrivableProjector()
+    route_lane = _static_lane("lane_route", x0=-10.0, x1=30.0, center_y=0.0)
+    stable_anchor = {
+        "actor_id": 101,
+        "world_xyz": [8.0, 1.5, 3.2],
+        "yaw_deg": 90.0,
+        "state": "RED",
+    }
+    live_detection = TrafficLightDetection(
+        world_xyz=np.array([8.8, 1.2, 3.0], dtype=np.float32),
+        state=TrafficLightState.GREEN,
+        stop_line_distance_m=10.0,
+        confidence=0.92,
+    )
+
+    payload = projector.build_world_layer(
+        _local_map([route_lane]),
+        EgoPose(
+            world_xyz=np.array([0.0, 0.0, 0.0], dtype=np.float32),
+            yaw_rad=0.0,
+            speed_mps=0.0,
+            acceleration_mps2=0.0,
+            current_lane_id="lane_route",
+            frenet_s=0.0,
+            frenet_d=0.0,
+            heading_error_rad=0.0,
+        ),
+        route_lane_ids={"lane_route"},
+        stable_traffic_lights=[stable_anchor],
+        live_traffic_lights=[live_detection],
+    )
+
+    assert len(payload["traffic_lights"]) == 1
+    signal = payload["traffic_lights"][0]
+    assert signal["actor_id"] == 101
+    assert signal["state"] == "GREEN"
+    assert signal["visibility_class"] == "route"
+    assert abs(signal["confidence"] - 0.92) < 1e-6

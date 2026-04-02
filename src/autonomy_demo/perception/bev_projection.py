@@ -5,7 +5,7 @@ from typing import Any
 
 import numpy as np
 
-from autonomy_demo.interfaces.types import DrivableSpaceMask, EgoPose, LocalMap, RoutePlan, StaticLaneSegment
+from autonomy_demo.interfaces.types import DrivableSpaceMask, EgoPose, LocalMap, RoutePlan, StaticLaneSegment, TrafficLightDetection
 
 # BEV grid parameters
 GRID_SIZE = 100
@@ -385,7 +385,22 @@ class BEVDrivableProjector:
         centerline_xy = np.asarray(centerline, dtype=np.float32)[:, :2]
         if len(centerline_xy) == 0:
             return float("inf")
-        return float(np.min(np.linalg.norm(centerline_xy - point_xy[None, :], axis=1)))
+        if len(centerline_xy) == 1:
+            return float(np.linalg.norm(centerline_xy[0] - point_xy))
+        best = float("inf")
+        point_xy = np.asarray(point_xy, dtype=np.float32)
+        for index in range(len(centerline_xy) - 1):
+            start = centerline_xy[index]
+            end = centerline_xy[index + 1]
+            delta = end - start
+            length_sq = float(np.dot(delta, delta))
+            if length_sq <= 1e-6:
+                best = min(best, float(np.linalg.norm(point_xy - start)))
+                continue
+            t = float(np.clip(np.dot(point_xy - start, delta) / length_sq, 0.0, 1.0))
+            projected = start + (delta * t)
+            best = min(best, float(np.linalg.norm(point_xy - projected)))
+        return best
 
     def _segment_centroid_xy(self, segment: StaticLaneSegment) -> np.ndarray:
         centerline = np.asarray(segment.centerline_world, dtype=np.float32)
@@ -544,6 +559,68 @@ class BEVDrivableProjector:
             "visibility_class": visibility_class,
         }
 
+    def _build_world_traffic_lights(
+        self,
+        *,
+        stable_traffic_lights: list[dict[str, Any]] | None,
+        live_traffic_lights: list[TrafficLightDetection] | None,
+        ego_pose: EgoPose,
+        route_segments: dict[str, StaticLaneSegment],
+    ) -> list[dict[str, Any]]:
+        if not stable_traffic_lights:
+            return []
+        ego_xy = np.asarray(ego_pose.world_xyz[:2], dtype=np.float32)
+        live = list(live_traffic_lights or [])
+        payload: list[dict[str, Any]] = []
+        for anchor in stable_traffic_lights:
+            world_xyz = np.asarray(anchor.get("world_xyz", [0.0, 0.0, 0.0]), dtype=np.float32)
+            if world_xyz.shape[0] < 3:
+                continue
+            ego_distance = float(np.linalg.norm(world_xyz[:2] - ego_xy))
+            if ego_distance > _NAV_ROUTE_RADIUS_M:
+                continue
+            route_distance = min(
+                (
+                    self._centerline_distance_xy(np.asarray(segment.centerline_world, dtype=np.float32), world_xyz[:2])
+                    for segment in route_segments.values()
+                ),
+                default=float("inf"),
+            )
+            if route_distance <= 8.0:
+                visibility_class = "route"
+            elif route_distance <= 16.0 or ego_distance <= _NAV_JUNCTION_RADIUS_M:
+                visibility_class = "adjacent"
+            else:
+                continue
+
+            matched_state = str(anchor.get("state", "UNKNOWN"))
+            matched_confidence = 0.35
+            best_distance = float("inf")
+            for signal in live:
+                signal_world = np.asarray(signal.world_xyz, dtype=np.float32)
+                distance = float(np.linalg.norm(signal_world[:2] - world_xyz[:2]))
+                if distance < best_distance and distance <= 7.5:
+                    best_distance = distance
+                    matched_state = signal.state.value if hasattr(signal.state, "value") else str(signal.state)
+                    matched_confidence = float(signal.confidence)
+            payload.append(
+                {
+                    "actor_id": int(anchor.get("actor_id", -1)),
+                    "world_xyz": world_xyz.tolist(),
+                    "yaw_deg": float(anchor.get("yaw_deg", 0.0)),
+                    "state": matched_state,
+                    "confidence": float(np.clip(matched_confidence, 0.0, 1.0)),
+                    "visibility_class": visibility_class,
+                }
+            )
+        payload.sort(
+            key=lambda signal: (
+                -self._visibility_rank(str(signal.get("visibility_class", "background"))),
+                float(np.linalg.norm(np.asarray(signal.get("world_xyz", [0.0, 0.0]))[:2] - ego_xy)),
+            )
+        )
+        return payload
+
     def build_world_layer(
         self,
         local_map: LocalMap | None,
@@ -551,9 +628,11 @@ class BEVDrivableProjector:
         *,
         route_plan: RoutePlan | None = None,
         route_lane_ids: set[str] | None = None,
+        stable_traffic_lights: list[dict[str, Any]] | None = None,
+        live_traffic_lights: list[TrafficLightDetection] | None = None,
     ) -> dict[str, Any]:
         if local_map is None or ego_pose is None or not local_map.static_lanes:
-            return {"signature": "", "roads": [], "lane_markers": [], "sidewalks": []}
+            return {"signature": "", "roads": [], "lane_markers": [], "sidewalks": [], "traffic_lights": []}
         if route_lane_ids is None:
             corridor = self.build_route_corridor(local_map, ego_pose, route_plan=route_plan)
             route_lane_ids = {strip["lane_id"] for strip in corridor.get("strips", [])}
@@ -577,7 +656,16 @@ class BEVDrivableProjector:
             + ego_cache_anchor
         )
         if cache_key == self._world_layer_cache_key and self._world_layer_cache_payload is not None:
-            return self._world_layer_cache_payload
+            cached_geometry = self._world_layer_cache_payload
+            return {
+                **cached_geometry,
+                "traffic_lights": self._build_world_traffic_lights(
+                    stable_traffic_lights=stable_traffic_lights,
+                    live_traffic_lights=live_traffic_lights,
+                    ego_pose=ego_pose,
+                    route_segments=self._route_segment_lookup(lane_lookup, route_lane_ids),
+                ),
+            }
 
         route_segments = self._route_segment_lookup(lane_lookup, route_lane_ids)
         roads: list[dict[str, Any]] = []
@@ -672,15 +760,23 @@ class BEVDrivableProjector:
                 }
             )
 
-        payload = {
+        geometry_payload = {
             "signature": "|".join(str(part) for part in cache_key),
             "roads": roads,
             "lane_markers": lane_markers,
             "sidewalks": sidewalks,
         }
         self._world_layer_cache_key = cache_key
-        self._world_layer_cache_payload = payload
-        return payload
+        self._world_layer_cache_payload = geometry_payload
+        return {
+            **geometry_payload,
+            "traffic_lights": self._build_world_traffic_lights(
+                stable_traffic_lights=stable_traffic_lights,
+                live_traffic_lights=live_traffic_lights,
+                ego_pose=ego_pose,
+                route_segments=route_segments,
+            ),
+        }
 
     def _route_plan_window(
         self,

@@ -45,8 +45,11 @@ class PipelineRuntime:
     def run(self, scenario: ScenarioConfig, max_ticks: int) -> None:
         latency = LatencyAccumulator()
         bev_projector = BEVDrivableProjector()
+        stable_traffic_light_anchors = []
         try:
             self.simulation.bootstrap(scenario)
+            if hasattr(self.simulation, "get_traffic_light_anchors"):
+                stable_traffic_light_anchors = list(self.simulation.get_traffic_light_anchors())
             self.simulation.attach_sensors()
             self.sensors.setup()
             self.sensors.warmup(self.simulation)
@@ -122,6 +125,8 @@ class PipelineRuntime:
                         ego_pose,
                         route_plan=getattr(self.motion_planner, "route_plan", None),
                         route_lane_ids={strip["lane_id"] for strip in road_corridor.get("strips", [])},
+                        stable_traffic_lights=stable_traffic_light_anchors,
+                        live_traffic_lights=traffic_lights,
                     )
                     if drivable_space is not None and ego_pose is not None:
                         world_points_xy, confidences = bev_projector.project_world_points(

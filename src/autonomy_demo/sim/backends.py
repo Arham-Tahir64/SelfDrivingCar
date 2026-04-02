@@ -56,6 +56,9 @@ class StubSimulationBackend:
     def shutdown(self) -> None:
         self.logger.info("Shutting down stub backend")
 
+    def get_traffic_light_anchors(self) -> list[dict[str, object]]:
+        return []
+
 
 class CarlaSimulationBackend(StubSimulationBackend):
     """Live CARLA 0.9.16 session bootstrap for PRD Section 3.2.1."""
@@ -117,6 +120,7 @@ class CarlaSimulationBackend(StubSimulationBackend):
         self._spawn_ego_actor(scenario)
         self._attach_collision_sensor()
         self._spawn_scenario_actors(scenario)
+        self._cache_traffic_light_anchors()
         self.logger.info(
             "Spawned ego=%s npcs=%s props=%s on map %s",
             getattr(self.state.ego_actor, "id", None),
@@ -476,6 +480,45 @@ class CarlaSimulationBackend(StubSimulationBackend):
                 self.logger.debug("Failed to destroy pre-existing actor %s (%s)", getattr(actor, "id", None), type_id)
         if cleared:
             self.logger.info("Cleared %s pre-existing dynamic CARLA actor(s) before scenario spawn", cleared)
+
+    def _traffic_light_state_value(self, actor) -> str:
+        raw_state = getattr(actor, "state", None)
+        if hasattr(actor, "get_state"):
+            try:
+                raw_state = actor.get_state()
+            except Exception:
+                pass
+        state = str(raw_state or "Unknown").upper()
+        if "RED" in state:
+            return "RED"
+        if "YELLOW" in state or "AMBER" in state:
+            return "AMBER"
+        if "GREEN" in state:
+            return "GREEN"
+        return "UNKNOWN"
+
+    def _cache_traffic_light_anchors(self) -> None:
+        self.state.traffic_light_anchors.clear()
+        if self.state.world is None:
+            return
+        for actor in self.state.world.get_actors():
+            type_id = str(getattr(actor, "type_id", ""))
+            if not type_id.startswith("traffic.traffic_light"):
+                continue
+            transform = actor.get_transform()
+            location = transform.location
+            self.state.traffic_light_anchors.append(
+                {
+                    "actor_id": int(getattr(actor, "id", -1)),
+                    "world_xyz": [float(location.x), float(location.y), float(location.z)],
+                    "yaw_deg": float(getattr(transform.rotation, "yaw", 0.0)),
+                    "state": self._traffic_light_state_value(actor),
+                }
+            )
+        self.logger.info("Cached %s stable traffic-light anchor(s)", len(self.state.traffic_light_anchors))
+
+    def get_traffic_light_anchors(self) -> list[dict[str, object]]:
+        return list(self.state.traffic_light_anchors)
 
     def _update_spectator_view(self) -> None:
         if self.state.world is None or self.state.ego_actor is None:
