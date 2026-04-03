@@ -27,3 +27,12 @@ class InProcessEventBus(EventBus):
     def snapshot(self) -> dict[str, Any]:
         return deepcopy(self._latest)
 
+    def snapshot_topics(self, topics: set[str] | list[str] | tuple[str, ...]) -> dict[str, Any]:
+        selected: dict[str, Any] = {}
+        for topic in topics:
+            if topic in self._latest:
+                selected[topic] = deepcopy(self._latest[topic])
+        return selected
+
+    def latest_topics(self, topics: set[str] | list[str] | tuple[str, ...]) -> dict[str, Any]:
+        return {topic: self._latest[topic] for topic in topics if topic in self._latest}

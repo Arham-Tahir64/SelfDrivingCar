@@ -136,6 +136,36 @@ export interface PipelineLatency {
 
 export interface LidarPreview {
   points: number[][];
+  objects: LidarPanelObject[];
+  threat_ids: number[];
+  path_polyline_xy?: number[][];
+  forward_cone?: {
+    length_m: number;
+    half_angle_deg: number;
+  };
+  status?: {
+    mode: string;
+    degraded: boolean;
+    lidar_track_count: number;
+    confirmed_track_count: number;
+    point_count: number;
+  };
+}
+
+export interface LidarPanelObject {
+  track_id: number;
+  track_state: string;
+  object_class: string;
+  confidence: number;
+  source_modality: string;
+  footprint_xy: number[][];
+  centroid_xy: number[];
+  velocity_xy: number[];
+  speed_mps: number;
+  relevance_score: number;
+  threat_rank: number;
+  is_path_relevant: boolean;
+  ghost_xy?: number[];
 }
 
 export interface BEVDrivableGrid {
@@ -143,6 +173,65 @@ export interface BEVDrivableGrid {
   rows: number;
   cols: number;
   cell_size_m: number;
+  x_min_m: number;
+  x_max_m: number;
+  y_min_m: number;
+  y_max_m: number;
+}
+
+export interface RoadCorridorStrip {
+  lane_id: string;
+  left_boundary_world: number[][];
+  right_boundary_world: number[][];
+  polygon_world: number[][];
+  is_junction?: boolean;
+}
+
+export interface RoadCorridorPayload {
+  strips: RoadCorridorStrip[];
+}
+
+export interface WorldRoad {
+  lane_id: string;
+  polygon_world: number[][];
+  centerline_world: number[][];
+  is_route: boolean;
+  visibility_class?: "route" | "adjacent" | "background";
+  is_junction?: boolean;
+  is_junction_patch?: boolean;
+  is_closed?: boolean;
+}
+
+export interface WorldLaneMarker {
+  marker_id: string;
+  polyline_world: number[][];
+  is_route: boolean;
+  visibility_class?: "route" | "adjacent" | "background";
+}
+
+export interface WorldSidewalk {
+  sidewalk_id: string;
+  polygon_world: number[][];
+  edge_world: number[][];
+  is_route_adjacent?: boolean;
+  visibility_class?: "route" | "adjacent" | "background";
+}
+
+export interface WorldTrafficLight {
+  actor_id: number;
+  world_xyz: number[];
+  yaw_deg: number;
+  state: string;
+  confidence: number;
+  visibility_class?: "route" | "adjacent" | "background";
+}
+
+export interface WorldLayerPayload {
+  signature: string;
+  roads: WorldRoad[];
+  lane_markers: WorldLaneMarker[];
+  sidewalks: WorldSidewalk[];
+  traffic_lights: WorldTrafficLight[];
 }
 
 export interface PipelineFrame {
@@ -162,5 +251,22 @@ export interface PipelineFrame {
   "visualization/camera_overlay"?: string;
   "visualization/lidar_preview"?: LidarPreview;
   "visualization/bev_drivable"?: BEVDrivableGrid;
+  "visualization/road_corridor"?: RoadCorridorPayload;
+  "visualization/world_layer"?: WorldLayerPayload;
   "pipeline/latency"?: PipelineLatency;
+}
+
+export interface WebSocketStats {
+  message_kind: "bootstrap" | "static_update" | "dynamic_frame";
+  total_bytes: number;
+  topic_count: number;
+  topic_bytes: Record<string, number>;
+}
+
+export interface WebSocketEnvelope {
+  message_kind: "bootstrap" | "static_update" | "dynamic_frame";
+  tick_id: number;
+  sim_time_s: number;
+  topics: Partial<PipelineFrame>;
+  ws_stats?: WebSocketStats;
 }

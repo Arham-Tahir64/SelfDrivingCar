@@ -94,30 +94,48 @@ class CarlaSensorSuite:
             blueprint.set_attribute("range", str(config.get("range_m", 50)))
             blueprint.set_attribute("horizontal_fov", str(config.get("azimuth_deg", 30)))
 
+    def _sensor_mount_spec(self, sensor_name: str) -> dict[str, float]:
+        if sensor_name == "front_camera":
+            return {"x": 2.3, "y": 0.0, "z": 0.8, "roll": 0.0, "pitch": 0.0, "yaw": 0.0}
+        if sensor_name == "rear_camera":
+            return {"x": -2.6, "y": 0.0, "z": 1.35, "roll": 0.0, "pitch": -4.0, "yaw": 180.0}
+        if sensor_name == "left_camera":
+            return {"x": 0.0, "y": -0.8, "z": 1.0, "roll": 0.0, "pitch": 0.0, "yaw": -90.0}
+        if sensor_name == "right_camera":
+            return {"x": 0.0, "y": 0.8, "z": 1.0, "roll": 0.0, "pitch": 0.0, "yaw": 90.0}
+        if sensor_name == "semantic_camera":
+            return {"x": 2.3, "y": 0.0, "z": 0.8, "roll": 0.0, "pitch": 0.0, "yaw": 0.0}
+        if sensor_name == "lidar":
+            return {"x": 0.0, "y": 0.0, "z": 2.2, "roll": 0.0, "pitch": 0.0, "yaw": 0.0}
+        if sensor_name == "radar":
+            return {"x": 2.0, "y": 0.0, "z": 0.5, "roll": 0.0, "pitch": 0.0, "yaw": 0.0}
+        if sensor_name in {"gnss", "imu"}:
+            return {"x": 0.0, "y": 0.0, "z": 1.5, "roll": 0.0, "pitch": 0.0, "yaw": 0.0}
+        return {"x": 0.0, "y": 0.0, "z": 0.0, "roll": 0.0, "pitch": 0.0, "yaw": 0.0}
+
     def _transform_for_sensor(self, sensor_name: str):
         carla = self.backend.state.carla
-        if sensor_name == "front_camera":
-            return carla.Transform(carla.Location(x=2.3, z=0.8))
-        if sensor_name == "rear_camera":
-            return carla.Transform(
-                carla.Location(x=-2.6, z=1.35),
-                carla.Rotation(yaw=180.0, pitch=-4.0),
-            )
-        if sensor_name == "left_camera":
-            return carla.Transform(carla.Location(y=-0.8, z=1.0), carla.Rotation(yaw=-90.0))
-        if sensor_name == "right_camera":
-            return carla.Transform(carla.Location(y=0.8, z=1.0), carla.Rotation(yaw=90.0))
-        if sensor_name == "semantic_camera":
-            return carla.Transform(carla.Location(x=2.3, z=0.8))
-        if sensor_name == "lidar":
-            return carla.Transform(carla.Location(z=2.2))
-        if sensor_name == "radar":
-            return carla.Transform(carla.Location(x=2.0, z=0.5))
-        if sensor_name == "gnss":
-            return carla.Transform(carla.Location(z=1.5))
-        if sensor_name == "imu":
-            return carla.Transform(carla.Location(z=1.5))
-        return carla.Transform()
+        mount = self._sensor_mount_spec(sensor_name)
+        return carla.Transform(
+            carla.Location(x=float(mount["x"]), y=float(mount["y"]), z=float(mount["z"])),
+            carla.Rotation(
+                roll=float(mount["roll"]),
+                pitch=float(mount["pitch"]),
+                yaw=float(mount["yaw"]),
+            ),
+        )
+
+    def _camera_calibration(self, sensor_name: str, image_width: int, image_height: int) -> dict[str, Any]:
+        config = self.sensor_config.get(sensor_name, {})
+        mount = self._sensor_mount_spec(sensor_name)
+        return {
+            "fov_deg": float(config.get("fov_deg", 90.0)),
+            "image_width": int(image_width),
+            "image_height": int(image_height),
+            "mount_xyz": [float(mount["x"]), float(mount["y"]), float(mount["z"])],
+            # roll, pitch, yaw in ego coordinates
+            "mount_rpy_deg": [float(mount["roll"]), float(mount["pitch"]), float(mount["yaw"])],
+        }
 
     def capture(self, tick_id: int, sim_time_s: float) -> SensorFrameBundle:
         frame_id = self.backend.state.current_frame
@@ -189,6 +207,15 @@ class CarlaSensorSuite:
                 "ego_lane_id": lane_id,
                 "carla_actor_annotations": camera_annotations["front_camera"],
                 "carla_camera_annotations": camera_annotations,
+                "camera_calibration": {
+                    camera.sensor_id: self._camera_calibration(
+                        camera.sensor_id,
+                        int(camera.frame.shape[1]),
+                        int(camera.frame.shape[0]),
+                    )
+                    for camera in [front_camera, rear_camera, left_camera, right_camera]
+                    + ([semantic_camera] if semantic_camera is not None else [])
+                },
                 "camera_capture": {
                     camera.sensor_id: self._camera_capture_metadata(camera, frame_id)
                     for camera in [front_camera, rear_camera, left_camera, right_camera]

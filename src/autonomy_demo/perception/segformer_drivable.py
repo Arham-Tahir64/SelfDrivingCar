@@ -11,9 +11,8 @@ from autonomy_demo.interfaces.types import DrivableSpaceMask
 
 logger = get_logger(__name__)
 
-# Cityscapes class indices considered "drivable"
-# 0: road, 1: sidewalk (included for conservative drivable area)
-DRIVABLE_CLASS_IDS = {0, 1}
+# Cityscapes class index used for actual roadway.
+ROAD_CLASS_ID = 0
 
 
 class SegFormerDrivableExtractor:
@@ -101,15 +100,11 @@ class SegFormerDrivableExtractor:
             probs = F.softmax(upsampled, dim=1)  # (1, 19, H, W)
             pred_classes = upsampled.argmax(dim=1).squeeze(0).cpu().numpy()  # (H, W)
 
-            # Build drivable mask: union of road + sidewalk classes
-            mask = np.isin(pred_classes, list(DRIVABLE_CLASS_IDS))
+            road_prob = probs.squeeze(0)[ROAD_CLASS_ID].cpu().numpy().astype(np.float32)
+            mask = self._road_mask(pred_classes, road_prob)
 
             # Build 2-class probability: [not-drivable, drivable]
-            probs_np = probs.squeeze(0).cpu().numpy()  # (19, H, W)
-            drivable_prob = np.zeros((height, width), dtype=np.float32)
-            for cid in DRIVABLE_CLASS_IDS:
-                drivable_prob += probs_np[cid]
-            drivable_prob = np.clip(drivable_prob, 0.0, 1.0)
+            drivable_prob = np.where(mask, road_prob, 0.0).astype(np.float32)
 
             class_probabilities = np.stack(
                 [1.0 - drivable_prob, drivable_prob], axis=-1
@@ -128,6 +123,71 @@ class SegFormerDrivableExtractor:
         )
         self._cached_result = result
         return result
+
+    def _road_mask(self, pred_classes: np.ndarray, road_prob: np.ndarray) -> np.ndarray:
+        candidate = (pred_classes == ROAD_CLASS_ID) & (road_prob >= 0.35)
+        if not candidate.any():
+            candidate = road_prob >= 0.5
+        filtered = self._connected_component_from_ego_anchor(candidate)
+        if filtered is None or not filtered.any():
+            return candidate.astype(np.bool_)
+        return filtered.astype(np.bool_)
+
+    def _connected_component_from_ego_anchor(self, candidate: np.ndarray) -> np.ndarray | None:
+        if candidate.ndim != 2 or not candidate.any():
+            return None
+        height, width = candidate.shape
+        seed = np.zeros_like(candidate, dtype=np.bool_)
+        seed[int(height * 0.72) :, int(width * 0.35) : int(width * 0.65)] = True
+        bottom_seed = np.zeros_like(candidate, dtype=np.bool_)
+        bottom_seed[int(height * 0.86) :, :] = True
+
+        try:
+            import cv2  # type: ignore
+
+            labels, stats = self._connected_components_cv2(candidate, cv2)
+            if labels is None or stats is None:
+                return candidate.astype(np.bool_)
+            selected = self._select_component_label(labels, stats, seed, bottom_seed)
+            if selected is None:
+                return candidate.astype(np.bool_)
+            return labels == selected
+        except Exception:
+            return candidate.astype(np.bool_)
+
+    def _connected_components_cv2(self, candidate: np.ndarray, cv2):
+        num_labels, labels, stats, _centroids = cv2.connectedComponentsWithStats(
+            candidate.astype(np.uint8),
+            connectivity=8,
+        )
+        if num_labels <= 1:
+            return None, None
+        return labels, stats
+
+    def _select_component_label(
+        self,
+        labels: np.ndarray,
+        stats: np.ndarray,
+        seed: np.ndarray,
+        bottom_seed: np.ndarray,
+    ) -> int | None:
+        best_label: int | None = None
+        best_score = -1
+        for label in range(1, stats.shape[0]):
+            component = labels == label
+            if not component.any():
+                continue
+            area = int(stats[label, 4])
+            if np.any(component & seed):
+                score = area + 10_000
+            elif np.any(component & bottom_seed):
+                score = area + 1_000
+            else:
+                score = area
+            if score > best_score:
+                best_label = label
+                best_score = score
+        return best_label
 
     @property
     def last_inference_ms(self) -> float:

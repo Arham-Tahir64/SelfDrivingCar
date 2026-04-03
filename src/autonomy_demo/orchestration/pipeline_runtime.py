@@ -45,8 +45,11 @@ class PipelineRuntime:
     def run(self, scenario: ScenarioConfig, max_ticks: int) -> None:
         latency = LatencyAccumulator()
         bev_projector = BEVDrivableProjector()
+        stable_traffic_light_anchors = []
         try:
             self.simulation.bootstrap(scenario)
+            if hasattr(self.simulation, "get_traffic_light_anchors"):
+                stable_traffic_light_anchors = list(self.simulation.get_traffic_light_anchors())
             self.simulation.attach_sensors()
             self.sensors.setup()
             self.sensors.warmup(self.simulation)
@@ -103,18 +106,49 @@ class PipelineRuntime:
                 t1 = _time_ms()
                 latency.record("localization", t1 - t0)
 
-                # Project drivable mask to BEV grid for dashboard visualization
-                bev_drivable_grid = None
-                if drivable_space is not None and ego_pose is not None:
-                    try:
-                        bev_drivable_grid = bev_projector.project(drivable_space, ego_pose)
-                    except Exception:
-                        pass
-
                 t0 = _time_ms()
                 local_map = self.mapping.run(detections, lanes, drivable_space, [], traffic_lights, ego_pose)
                 t1 = _time_ms()
                 latency.record("mapping", t1 - t0)
+
+                bev_drivable_grid = None
+                road_corridor = None
+                world_layer = None
+                try:
+                    road_corridor = bev_projector.build_route_corridor(
+                        local_map,
+                        ego_pose,
+                        route_plan=getattr(self.motion_planner, "route_plan", None),
+                    )
+                    world_layer = bev_projector.build_world_layer(
+                        local_map,
+                        ego_pose,
+                        route_plan=getattr(self.motion_planner, "route_plan", None),
+                        route_lane_ids={strip["lane_id"] for strip in road_corridor.get("strips", [])},
+                        stable_traffic_lights=stable_traffic_light_anchors,
+                        live_traffic_lights=traffic_lights,
+                    )
+                    if drivable_space is not None and ego_pose is not None:
+                        world_points_xy, confidences = bev_projector.project_world_points(
+                            drivable_space,
+                            ego_pose,
+                            camera_calibration=(
+                                bundle.metadata.get("camera_calibration", {}) or {}
+                            ).get("front_camera"),
+                        )
+                        bev_projector.update_world_history(
+                            world_points_xy,
+                            confidences,
+                            sim_time_s=float(sim_time_s),
+                            corridor_polygons_xy=list(road_corridor.get("polygons_xy", [])),
+                        )
+                    if ego_pose is not None:
+                        bev_drivable_grid = bev_projector.render_local_crop(
+                            ego_pose,
+                            sim_time_s=float(sim_time_s),
+                        )
+                except Exception:
+                    pass
 
                 t0 = _time_ms()
                 predictions = self.prediction.run(local_map)
@@ -158,6 +192,16 @@ class PipelineRuntime:
                 self.context.event_bus.publish(TopicName.CONTROL_VEHICLE_COMMAND.value, command)
                 if bev_drivable_grid is not None:
                     self.context.event_bus.publish(TopicName.VISUALIZATION_BEV_DRIVABLE.value, bev_drivable_grid)
+                if road_corridor is not None:
+                    self.context.event_bus.publish(
+                        TopicName.VISUALIZATION_ROAD_CORRIDOR.value,
+                        {"strips": list(road_corridor.get("strips", []))},
+                    )
+                if world_layer is not None:
+                    self.context.event_bus.publish(
+                        TopicName.VISUALIZATION_WORLD_LAYER.value,
+                        world_layer,
+                    )
 
                 # Publish per-tick latency for the dashboard
                 tick_latency = latency.latest()

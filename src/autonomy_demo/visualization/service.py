@@ -12,6 +12,12 @@ from autonomy_demo.interfaces.enums import TopicName
 from autonomy_demo.interfaces.types import CameraFrame, ControlCommand, DrivableSpaceMask, EgoPose, EgoTrajectory, LaneLine, LocalMap, ObjectDetection, TrafficLightDetection
 
 
+def _is_image_grounded_bbox(bbox_xyxy: np.ndarray | None, *, position_estimate_kind: str) -> bool:
+    if bbox_xyxy is None:
+        return False
+    return str(position_estimate_kind) == "camera_projection"
+
+
 class NullVisualizationService:
     """Read-only subscriber that captures the latest events without affecting the pipeline."""
 
@@ -87,7 +93,10 @@ class NullVisualizationService:
             )
             frame = overlay.astype(np.uint8)
         for detection in self._latest_detections:
-            if detection.image_bbox_xyxy is None:
+            if not _is_image_grounded_bbox(
+                detection.image_bbox_xyxy,
+                position_estimate_kind=detection.position_estimate_kind,
+            ):
                 continue
             x1, y1, x2, y2 = detection.image_bbox_xyxy.astype(int).tolist()
             cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 255), 2)
@@ -105,7 +114,10 @@ class NullVisualizationService:
             polyline = lane.polyline_image.astype(np.int32).reshape((-1, 1, 2))
             cv2.polylines(frame, [polyline], False, (255, 255, 0), 2)
         for traffic_light in self._latest_traffic_lights:
-            if traffic_light.image_bbox_xyxy is None:
+            if not _is_image_grounded_bbox(
+                traffic_light.image_bbox_xyxy,
+                position_estimate_kind=traffic_light.position_estimate_kind,
+            ):
                 continue
             x1, y1, x2, y2 = traffic_light.image_bbox_xyxy.astype(int).tolist()
             color = {

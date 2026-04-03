@@ -106,6 +106,20 @@ def _record_perception_metadata(
     bundle.metadata["perception_summary"] = status_summary
 
 
+def _public_image_bbox(
+    bbox_xyxy: np.ndarray | None,
+    *,
+    position_estimate_kind: str,
+) -> np.ndarray | None:
+    if bbox_xyxy is None:
+        return None
+    # Truth/bootstrap detections remain useful in world space, but their 2D boxes
+    # are heuristic approximations and should not be treated as image-grounded UI data.
+    if str(position_estimate_kind) == "truth_fallback":
+        return None
+    return np.asarray(bbox_xyxy, dtype=np.float32)
+
+
 def _serialize_camera_detections_by_sensor(
     detections_by_sensor: dict[str, list[FrameDetection2D]],
 ) -> dict[str, list[dict[str, Any]]]:
@@ -165,7 +179,7 @@ class StubPerceptionModule:
             velocity=np.array([5.0, 0.0, 0.0], dtype=np.float32),
             confidence=0.95,
             track_state=TrackState.CONFIRMED,
-            image_bbox_xyxy=np.array([500.0, 300.0, 700.0, 600.0], dtype=np.float32),
+            image_bbox_xyxy=None,
             source_modality="bootstrap",
             source_sensor_ids=["front_camera"],
             position_estimate_kind="truth_fallback",
@@ -190,7 +204,7 @@ class StubPerceptionModule:
             state=TrafficLightState.GREEN,
             stop_line_distance_m=20.0,
             confidence=0.8,
-            image_bbox_xyxy=np.array([800.0, 120.0, 860.0, 260.0], dtype=np.float32),
+            image_bbox_xyxy=None,
             source_modality="bootstrap",
             source_sensor_ids=["front_camera"],
             position_estimate_kind="truth_fallback",
@@ -458,7 +472,10 @@ class PerceptionStack(_CameraSceneContextMixin):
                         state=detection.traffic_light_state or TrafficLightState.UNKNOWN,
                         stop_line_distance_m=max(0.0, float(world_xyz[0])),
                         confidence=float(detection.confidence),
-                        image_bbox_xyxy=np.asarray(detection.bbox_xyxy, dtype=np.float32),
+                        image_bbox_xyxy=_public_image_bbox(
+                            detection.bbox_xyxy,
+                            position_estimate_kind=detection.position_estimate_kind,
+                        ),
                         source_modality=detection.source_modality,
                         source_sensor_ids=list(detection.source_sensor_ids or [detection.source_sensor_id]),
                         position_estimate_kind=detection.position_estimate_kind,
@@ -473,7 +490,10 @@ class PerceptionStack(_CameraSceneContextMixin):
                     velocity=velocity,
                     confidence=float(detection.confidence),
                     track_state=detection.track_state,
-                    image_bbox_xyxy=np.asarray(detection.bbox_xyxy, dtype=np.float32),
+                    image_bbox_xyxy=_public_image_bbox(
+                        detection.bbox_xyxy,
+                        position_estimate_kind=detection.position_estimate_kind,
+                    ),
                     source_modality=detection.source_modality,
                     source_sensor_ids=list(detection.source_sensor_ids or [detection.source_sensor_id]),
                     position_estimate_kind=detection.position_estimate_kind,

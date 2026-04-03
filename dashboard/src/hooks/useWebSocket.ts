@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import { useFrameStore } from "../store/frameStore";
-import type { PipelineFrame } from "../utils/types";
+import type { WebSocketEnvelope } from "../utils/types";
 
 const RECONNECT_BASE_MS = 1000;
 const RECONNECT_MAX_MS = 10000;
@@ -16,27 +16,14 @@ function resolveWebSocketUrl(): string {
 }
 
 export function useWebSocket() {
-  const pushFrame = useFrameStore((s) => s.pushFrame);
+  const applyEnvelope = useFrameStore((s) => s.applyEnvelope);
   const setConnected = useFrameStore((s) => s.setConnected);
   const wsRef = useRef<WebSocket | null>(null);
   const retriesRef = useRef(0);
-  const pendingFrameRef = useRef<PipelineFrame | null>(null);
-  const rafRef = useRef<number | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     let timeout: ReturnType<typeof setTimeout>;
-
-    function flushPendingFrame() {
-      const frame = pendingFrameRef.current;
-      pendingFrameRef.current = null;
-      if (frame) {
-        pushFrame(frame);
-      }
-      if (!cancelled) {
-        rafRef.current = window.requestAnimationFrame(flushPendingFrame);
-      }
-    }
 
     function connect() {
       if (cancelled) return;
@@ -50,8 +37,8 @@ export function useWebSocket() {
 
       ws.onmessage = (ev) => {
         try {
-          const frame: PipelineFrame = JSON.parse(ev.data);
-          pendingFrameRef.current = frame;
+          const envelope: WebSocketEnvelope = JSON.parse(ev.data);
+          applyEnvelope(envelope);
         } catch {
           // skip malformed messages
         }
@@ -75,15 +62,11 @@ export function useWebSocket() {
     }
 
     connect();
-    rafRef.current = window.requestAnimationFrame(flushPendingFrame);
 
     return () => {
       cancelled = true;
       clearTimeout(timeout);
-      if (rafRef.current !== null) {
-        window.cancelAnimationFrame(rafRef.current);
-      }
       wsRef.current?.close();
     };
-  }, [pushFrame, setConnected]);
+  }, [applyEnvelope, setConnected]);
 }

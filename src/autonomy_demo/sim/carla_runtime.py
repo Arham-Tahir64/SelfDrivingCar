@@ -94,3 +94,4 @@ class CarlaSessionState:
     current_snapshot: Any | None = None
     current_frame: int | None = None
     collision_events: list[dict[str, Any]] = field(default_factory=list)
+    traffic_light_anchors: list[dict[str, Any]] = field(default_factory=list)

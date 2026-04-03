@@ -71,3 +71,5 @@ class TopicName(str, Enum):
     PLANNING_CANDIDATES = "planning/candidates"
     PIPELINE_LATENCY = "pipeline/latency"
     VISUALIZATION_BEV_DRIVABLE = "visualization/bev_drivable"
+    VISUALIZATION_ROAD_CORRIDOR = "visualization/road_corridor"
+    VISUALIZATION_WORLD_LAYER = "visualization/world_layer"

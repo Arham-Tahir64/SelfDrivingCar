@@ -63,5 +63,16 @@ class SensorManager:
                 frame_id=tick_id,
             ),
             semantic_camera=CameraFrame("semantic_camera", image, sim_time_s, frame_id=tick_id),
-            metadata={"synthetic": True},
+            metadata={
+                "synthetic": True,
+                "camera_calibration": {
+                    "front_camera": {
+                        "fov_deg": 90.0,
+                        "image_width": int(image.shape[1]),
+                        "image_height": int(image.shape[0]),
+                        "mount_xyz": [2.3, 0.0, 0.8],
+                        "mount_rpy_deg": [0.0, 0.0, 0.0],
+                    }
+                },
+            },
         )
