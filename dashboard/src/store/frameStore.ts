@@ -7,8 +7,12 @@ interface FrameStore {
   currentFrameReceivedAtMs: number;
   frameIntervalMs: number;
   connected: boolean;
+  paused: boolean;
+  playbackSpeed: number;
   applyEnvelope: (envelope: WebSocketEnvelope) => void;
   setConnected: (connected: boolean) => void;
+  togglePause: () => void;
+  setPlaybackSpeed: (speed: number) => void;
 }
 
 function nowMs(): number {
@@ -55,8 +59,17 @@ export const useFrameStore = create<FrameStore>((set) => ({
   currentFrameReceivedAtMs: 0,
   frameIntervalMs: 50,
   connected: false,
+  paused: false,
+  playbackSpeed: 1.0,
+  togglePause: () => set((state) => ({ paused: !state.paused })),
+  setPlaybackSpeed: (speed: number) => set({ playbackSpeed: speed }),
   applyEnvelope: (envelope) =>
     set((state) => {
+      // When paused, only accept bootstrap/static updates (scene setup), skip dynamic frames
+      if (state.paused && envelope.message_kind === "dynamic_frame") {
+        return {};
+      }
+
       if (envelope.message_kind === "static_update") {
         if (state.currentFrame == null) {
           const bootFrame = mergeFrame(null, envelope.topics, envelope.tick_id, envelope.sim_time_s);

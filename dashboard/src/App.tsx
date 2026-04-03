@@ -1,12 +1,27 @@
+import { useEffect } from "react";
 import { Canvas } from "@react-three/fiber";
 import { useWebSocket } from "./hooks/useWebSocket";
 import BEVScene from "./components/BEVScene";
 import HUD from "./components/HUD";
 import CameraPanel from "./components/CameraPanel";
 import LidarPanel from "./components/LidarPanel";
+import PlaybackControls from "./components/PlaybackControls";
+import { useFrameStore } from "./store/frameStore";
 
 export default function App() {
   useWebSocket();
+
+  // Keyboard shortcut: Space to toggle pause
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.code === "Space" && e.target === document.body) {
+        e.preventDefault();
+        useFrameStore.getState().togglePause();
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, []);
 
   return (
     <div style={styles.root}>
@@ -19,6 +34,7 @@ export default function App() {
           <BEVScene />
         </Canvas>
         <HUD />
+        <PlaybackControls />
       </div>
 
       {/* Right: Camera (top 60%) + LiDAR (bottom 40%) */}

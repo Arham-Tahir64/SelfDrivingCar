@@ -150,13 +150,12 @@ def test_perception_stack_converts_bootstrap_annotations() -> None:
     assert len(detections) == 1
     assert detections[0].track_id == 10
     assert detections[0].track_state == TrackState.TENTATIVE
-    assert detections[0].image_bbox_xyxy is None
+    assert detections[0].image_bbox_xyxy is not None  # bootstrap bboxes now passed through for overlay
     assert detections[0].source_modality == "bootstrap"
     assert detections[0].position_estimate_kind == "truth_fallback"
     assert isinstance(lanes, list)
     assert drivable.mask.shape == (120, 200)
     assert len(traffic_lights) == 1
-    assert traffic_lights[0].image_bbox_xyxy is None
     assert traffic_lights[0].source_modality == "bootstrap"
     assert cones == []
     assert bundle.metadata["perception_summary"].fallback_state == "bootstrap"

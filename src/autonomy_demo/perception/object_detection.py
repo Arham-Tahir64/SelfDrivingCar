@@ -181,7 +181,9 @@ class YoloObjectDetector:
                 device=self.device,
                 verbose=False,
             )
-        except Exception:  # pragma: no cover - depends on optional runtime deps
+        except (RuntimeError, ValueError, OSError) as exc:  # pragma: no cover - depends on optional runtime deps
+            import logging
+            logging.getLogger(__name__).warning("YOLO predict failed on %s: %s", sensor_id, exc)
             return self._from_bootstrap(bootstrap_annotations, sensor_id=sensor_id), "bootstrap"
         if not results:
             return [], "camera"

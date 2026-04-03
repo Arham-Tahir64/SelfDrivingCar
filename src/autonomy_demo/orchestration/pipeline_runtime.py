@@ -18,8 +18,25 @@ from autonomy_demo.interfaces.contracts import (
     VisualizationSink,
 )
 from autonomy_demo.interfaces.enums import TopicName
+from autonomy_demo.common.logging import get_logger
 from autonomy_demo.interfaces.types import ReplayFrame, ScenarioConfig
 from autonomy_demo.perception.bev_projection import BEVDrivableProjector
+
+_logger = get_logger(__name__)
+
+_TOP_LEVEL_LATENCY_KEYS = (
+    "perception",
+    "localization",
+    "mapping",
+    "prediction",
+    "planning",
+    "control",
+)
+
+_AUXILIARY_LATENCY_KEYS = (
+    "segformer_drivable",
+    "learned_lanes",
+)
 
 
 def _time_ms() -> float:
@@ -147,8 +164,10 @@ class PipelineRuntime:
                             ego_pose,
                             sim_time_s=float(sim_time_s),
                         )
+                except (ValueError, TypeError, KeyError) as exc:
+                    _logger.debug("BEV projection skipped for tick %s: %s", tick_id, exc)
                 except Exception:
-                    pass
+                    _logger.warning("BEV projection failed for tick %s", tick_id, exc_info=True)
 
                 t0 = _time_ms()
                 predictions = self.prediction.run(local_map)
@@ -205,7 +224,10 @@ class PipelineRuntime:
 
                 # Publish per-tick latency for the dashboard
                 tick_latency = latency.latest()
-                tick_latency["total"] = sum(tick_latency.values())
+                tick_latency["total"] = sum(float(tick_latency.get(key, 0.0)) for key in _TOP_LEVEL_LATENCY_KEYS)
+                auxiliary_total = sum(float(tick_latency.get(key, 0.0)) for key in _AUXILIARY_LATENCY_KEYS)
+                if auxiliary_total > 0.0:
+                    tick_latency["perception_aux_total"] = auxiliary_total
                 self.context.event_bus.publish(TopicName.PIPELINE_LATENCY.value, tick_latency)
 
                 self.context.event_bus.publish(

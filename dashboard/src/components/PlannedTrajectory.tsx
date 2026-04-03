@@ -8,6 +8,15 @@ import { worldToScene } from "../utils/scene";
 
 const TRAJ_COLOR = new THREE.Color(COLORS.trajectory);
 
+// Shared materials — created once, reused across frames
+const lineMaterial = new THREE.LineBasicMaterial({
+  color: TRAJ_COLOR,
+  transparent: true,
+  opacity: 0.95,
+});
+const dotGeometry = new THREE.SphereGeometry(0.3);
+const dotMaterial = new THREE.MeshBasicMaterial({ color: TRAJ_COLOR });
+
 export default function PlannedTrajectory() {
   const groupRef = useRef<THREE.Group>(null);
   const lastTickRef = useRef<number | null>(null);
@@ -19,7 +28,13 @@ export default function PlannedTrajectory() {
     if (!frame || lastTickRef.current === frame.tick_id) return;
     lastTickRef.current = frame.tick_id;
 
-    disposeObject3D(group);
+    // Dispose old geometry but NOT shared materials
+    for (const child of [...group.children]) {
+      if (child instanceof THREE.Line || child instanceof THREE.Mesh) {
+        if (child.geometry) child.geometry.dispose();
+      }
+    }
+    group.clear();
 
     const traj = frame?.["planning/ego_trajectory"];
     if (!traj?.waypoints || traj.waypoints.length < 2) return;
@@ -31,18 +46,10 @@ export default function PlannedTrajectory() {
       },
     );
     const geom = new THREE.BufferGeometry().setFromPoints(points);
-    const mat = new THREE.LineBasicMaterial({
-      color: TRAJ_COLOR,
-      transparent: true,
-      opacity: 0.95,
-    });
-    group.add(new THREE.Line(geom, mat));
+    group.add(new THREE.Line(geom, lineMaterial));
 
-    // Add dots at waypoint positions for visibility
-    const dotGeom = new THREE.SphereGeometry(0.3);
-    const dotMat = new THREE.MeshBasicMaterial({ color: TRAJ_COLOR });
     for (let i = 0; i < points.length; i += 3) {
-      const dot = new THREE.Mesh(dotGeom, dotMat);
+      const dot = new THREE.Mesh(dotGeometry, dotMaterial);
       dot.position.copy(points[i]);
       group.add(dot);
     }

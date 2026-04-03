@@ -20,6 +20,7 @@ export function useWebSocket() {
   const setConnected = useFrameStore((s) => s.setConnected);
   const wsRef = useRef<WebSocket | null>(null);
   const retriesRef = useRef(0);
+  const lastAppliedRef = useRef(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -38,6 +39,16 @@ export function useWebSocket() {
       ws.onmessage = (ev) => {
         try {
           const envelope: WebSocketEnvelope = JSON.parse(ev.data);
+          const speed = useFrameStore.getState().playbackSpeed;
+
+          // For non-1x speeds, throttle dynamic frame application
+          if (envelope.message_kind === "dynamic_frame" && speed !== 1.0) {
+            const now = performance.now();
+            const minInterval = 50 / Math.max(speed, 0.1); // base 50ms interval scaled
+            if (now - lastAppliedRef.current < minInterval) return;
+            lastAppliedRef.current = now;
+          }
+
           applyEnvelope(envelope);
         } catch {
           // skip malformed messages

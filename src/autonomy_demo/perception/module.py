@@ -113,10 +113,6 @@ def _public_image_bbox(
 ) -> np.ndarray | None:
     if bbox_xyxy is None:
         return None
-    # Truth/bootstrap detections remain useful in world space, but their 2D boxes
-    # are heuristic approximations and should not be treated as image-grounded UI data.
-    if str(position_estimate_kind) == "truth_fallback":
-        return None
     return np.asarray(bbox_xyxy, dtype=np.float32)
 
 
@@ -342,11 +338,17 @@ class PerceptionStack(_CameraSceneContextMixin):
             )
             bundle.metadata["perception_camera_detections"] = camera_detection_debug
             return object_detections, lanes, drivable_space, traffic_lights, []
-        except Exception as exc:
+        except (ValueError, TypeError, KeyError, IndexError, AttributeError) as exc:
             bundle.metadata["perception_status"] = "degraded"
             bundle.metadata["perception_error"] = str(exc)
             bundle.metadata["perception_camera_detections"] = {}
             self.logger.warning("Perception degraded for tick %s: %s", bundle.tick_id, exc)
+            return _empty_outputs(bundle)
+        except Exception as exc:
+            bundle.metadata["perception_status"] = "degraded"
+            bundle.metadata["perception_error"] = str(exc)
+            bundle.metadata["perception_camera_detections"] = {}
+            self.logger.error("Unexpected perception failure for tick %s", bundle.tick_id, exc_info=True)
             return _empty_outputs(bundle)
 
     def detect_dynamic(
@@ -552,11 +554,17 @@ class LidarPerceptionStack(_CameraSceneContextMixin):
             bundle.metadata["perception_lidar_cluster_count"] = len(object_detections)
             bundle.metadata["perception_camera_detections"] = {}
             return object_detections, lanes, drivable_space, [], []
-        except Exception as exc:
+        except (ValueError, TypeError, KeyError, IndexError, AttributeError) as exc:
             bundle.metadata["perception_status"] = "degraded"
             bundle.metadata["perception_error"] = str(exc)
             bundle.metadata["perception_camera_detections"] = {}
             self.logger.warning("LiDAR perception degraded for tick %s: %s", bundle.tick_id, exc)
+            return _empty_outputs(bundle)
+        except Exception as exc:
+            bundle.metadata["perception_status"] = "degraded"
+            bundle.metadata["perception_error"] = str(exc)
+            bundle.metadata["perception_camera_detections"] = {}
+            self.logger.error("Unexpected LiDAR perception failure for tick %s", bundle.tick_id, exc_info=True)
             return _empty_outputs(bundle)
 
     def detect_dynamic(
@@ -649,11 +657,17 @@ class FusedPerceptionStack(_CameraSceneContextMixin):
             )
             bundle.metadata["perception_camera_detections"] = camera_detection_debug
             return canonical_objects, lanes, drivable_space, traffic_lights, []
-        except Exception as exc:
+        except (ValueError, TypeError, KeyError, IndexError, AttributeError) as exc:
             bundle.metadata["perception_status"] = "degraded"
             bundle.metadata["perception_error"] = str(exc)
             bundle.metadata["perception_camera_detections"] = {}
             self.logger.warning("Fused perception degraded for tick %s: %s", bundle.tick_id, exc)
+            return _empty_outputs(bundle)
+        except Exception as exc:
+            bundle.metadata["perception_status"] = "degraded"
+            bundle.metadata["perception_error"] = str(exc)
+            bundle.metadata["perception_camera_detections"] = {}
+            self.logger.error("Unexpected fused perception failure for tick %s", bundle.tick_id, exc_info=True)
             return _empty_outputs(bundle)
 
     def _canonical_detections(

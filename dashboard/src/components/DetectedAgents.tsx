@@ -45,9 +45,16 @@ function bboxSize(bbox: number[][]): THREE.Vector3 {
   return new THREE.Vector3(dx, dy, dz);
 }
 
+interface PooledProxy {
+  group: THREE.Group;
+  objectClass: string;
+  modality: string;
+}
+
 export default function DetectedAgents() {
   const groupRef = useRef<THREE.Group>(null);
   const lastTickRef = useRef<number | null>(null);
+  const poolRef = useRef<Map<number, PooledProxy>>(new Map());
 
   useFrame(() => {
     const frame = useFrameStore.getState().currentFrame;
@@ -56,29 +63,65 @@ export default function DetectedAgents() {
     if (!frame || lastTickRef.current === frame.tick_id) return;
     lastTickRef.current = frame.tick_id;
 
-    disposeObject3D(group);
-
     const detections = frame["perception/detections"];
-    if (!detections) return;
+    const activeIds = new Set<number>();
 
-    for (const det of detections) {
-      if (det.track_state === "DELETED" || det.track_state === "LOST") continue;
+    if (detections) {
+      for (const det of detections) {
+        if (det.track_state === "DELETED" || det.track_state === "LOST") continue;
 
-      const centroid = bboxCentroid(det.world_bbox_3d);
-      const size = bboxSize(det.world_bbox_3d);
-      const color = classColor(det.object_class);
-      const opacity = classOpacity(det.object_class);
-      const outlineColor = modalityColor(det.source_modality);
-      const sceneCenter = worldToScene([centroid.x, centroid.y, centroid.z]);
-      const displaySize = new THREE.Vector3(
-        Math.max(size.x, 0.6),
-        Math.max(size.y, 0.6),
-        Math.max(size.z, 0.6),
-      );
-      const proxy = buildAgentProxy(det.object_class, color, outlineColor, opacity);
-      proxy.position.set(sceneCenter.x, 0.02, sceneCenter.z);
-      proxy.scale.set(displaySize.x, displaySize.y, displaySize.z);
-      group.add(proxy);
+        const trackId = det.track_id;
+        activeIds.add(trackId);
+
+        const centroid = bboxCentroid(det.world_bbox_3d);
+        const size = bboxSize(det.world_bbox_3d);
+        const sceneCenter = worldToScene([centroid.x, centroid.y, centroid.z]);
+        const displaySize = new THREE.Vector3(
+          Math.max(size.x, 0.6),
+          Math.max(size.y, 0.6),
+          Math.max(size.z, 0.6),
+        );
+
+        const existing = poolRef.current.get(trackId);
+        const classChanged = existing && existing.objectClass !== det.object_class;
+        const modalityChanged = existing && existing.modality !== det.source_modality;
+
+        if (existing && !classChanged && !modalityChanged) {
+          // Reuse existing proxy — just update transform
+          existing.group.position.set(sceneCenter.x, 0.02, sceneCenter.z);
+          existing.group.scale.set(displaySize.x, displaySize.y, displaySize.z);
+        } else {
+          // Remove old proxy if class/modality changed
+          if (existing) {
+            group.remove(existing.group);
+            disposeObject3D(existing.group);
+            poolRef.current.delete(trackId);
+          }
+
+          // Create new proxy
+          const color = classColor(det.object_class);
+          const opacity = classOpacity(det.object_class);
+          const outlineColor = modalityColor(det.source_modality);
+          const proxy = buildAgentProxy(det.object_class, color, outlineColor, opacity);
+          proxy.position.set(sceneCenter.x, 0.02, sceneCenter.z);
+          proxy.scale.set(displaySize.x, displaySize.y, displaySize.z);
+          group.add(proxy);
+          poolRef.current.set(trackId, {
+            group: proxy,
+            objectClass: det.object_class,
+            modality: det.source_modality,
+          });
+        }
+      }
+    }
+
+    // Remove proxies for tracks no longer present
+    for (const [trackId, pooled] of poolRef.current) {
+      if (!activeIds.has(trackId)) {
+        group.remove(pooled.group);
+        disposeObject3D(pooled.group);
+        poolRef.current.delete(trackId);
+      }
     }
   });
 
