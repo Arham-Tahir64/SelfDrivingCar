@@ -1,9 +1,11 @@
 import numpy as np
 
 from autonomy_demo.interfaces.enums import BehaviorState, LaneLineType, TrackState
-from autonomy_demo.interfaces.types import CameraFrame, LaneLine, ObjectDetection, PerceptionStatus
+from autonomy_demo.interfaces.types import CameraFrame, EgoTrajectory, LaneLine, ObjectDetection, PerceptionStatus, Waypoint
 from autonomy_demo.common.serialization import serialize
 from autonomy_demo.orchestration.event_bus import InProcessEventBus
+from autonomy_demo.planning.motion_planner import PlannerCandidate, PlannerCostBreakdown
+from autonomy_demo.visualization.websocket_bridge import _serialize_candidates_for_dashboard
 
 
 def test_object_detection_validation() -> None:
@@ -77,3 +79,46 @@ def test_serialization_preserves_lane_provenance_fields() -> None:
     assert payload["perception/lanes"][0]["source_modality"] == "camera"
     assert payload["perception/lanes"][0]["source_sensor_ids"] == ["front_camera"]
     assert payload["perception/lanes"][0]["position_estimate_kind"] == "camera_projection"
+
+
+def test_planner_candidate_dashboard_serialization_preserves_debug_fields() -> None:
+    candidate = PlannerCandidate(
+        trajectory=EgoTrajectory(
+            waypoints=[
+                Waypoint(x=0.0, y=0.0, yaw=0.0, velocity=4.0, timestamp=0.0),
+                Waypoint(x=1.0, y=0.2, yaw=0.1, velocity=3.5, timestamp=0.1),
+            ],
+            cost=12.5,
+            behavior_state=BehaviorState.LANE_KEEP,
+        ),
+        lane_id="road_1:section_0:lane_2",
+        target_speed_mps=5.0,
+        score=12.5,
+        feasible=False,
+        reject_reason="dynamic_collision",
+        reference_lane_id="road_1:section_0:lane_1",
+        target_lane_id="road_1:section_0:lane_2",
+        target_d_m=3.5,
+        terminal_time_s=5.0,
+        cost_breakdown=PlannerCostBreakdown(
+            collision=0.8,
+            cone_proximity=0.1,
+            lane_deviation=0.2,
+            jerk=0.3,
+            speed_error=0.4,
+            traffic_violation=1.0,
+            route_progress=-0.6,
+            total=12.5,
+        ),
+    )
+
+    payload = _serialize_candidates_for_dashboard([candidate])
+
+    assert payload[0]["feasible"] is False
+    assert payload[0]["reject_reason"] == "dynamic_collision"
+    assert payload[0]["reference_lane_id"] == "road_1:section_0:lane_1"
+    assert payload[0]["target_lane_id"] == "road_1:section_0:lane_2"
+    assert payload[0]["target_d_m"] == 3.5
+    assert payload[0]["terminal_time_s"] == 5.0
+    assert payload[0]["cost_breakdown"]["traffic_violation"] == 1.0
+    assert payload[0]["cost_breakdown"]["total"] == 12.5

@@ -11,6 +11,9 @@ const REJECTED_BASE = new THREE.Color("#555566");
 const REJECTED_BAD = new THREE.Color("#FF4444");
 
 function candidateColor(candidate: PlannerCandidate, minScore: number, maxScore: number): THREE.Color {
+  if (!candidate.feasible) {
+    return REJECTED_BASE.clone();
+  }
   const range = Math.max(maxScore - minScore, 0.01);
   const t = Math.min(1, (candidate.score - minScore) / range);
   // Chosen (best) = cyan, rejected = grey blending to red as score increases
@@ -65,7 +68,7 @@ export default function TrajectoryCandidates() {
       const mat = new THREE.LineBasicMaterial({
         color,
         transparent: true,
-        opacity: 0.25,
+        opacity: candidate.feasible ? 0.25 : 0.08,
         depthWrite: false,
       });
       const line = new THREE.Line(geom, mat);

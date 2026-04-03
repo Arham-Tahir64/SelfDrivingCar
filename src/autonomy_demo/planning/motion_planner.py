@@ -1,14 +1,35 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 
 from autonomy_demo.common.geometry import distance_xy
+from autonomy_demo.control.controller import RouteFollowerController
 from autonomy_demo.interfaces.enums import BehaviorState, TrafficLightState
 from autonomy_demo.interfaces.types import AgentPrediction, EgoPose, EgoTrajectory, LocalMap, Waypoint
 from autonomy_demo.mapping.lane_graph import parse_lane_id, project_point_to_centerline, sample_centerline_at_s
 from autonomy_demo.planning.route_following import RouteFollowerMotionPlanner
+
+_PLANNING_HORIZON_S = 5.0
+_PLANNING_DT_S = 0.1
+_PLANNING_STEPS = int(_PLANNING_HORIZON_S / _PLANNING_DT_S)
+_EGO_LENGTH_M = 4.6
+_EGO_WIDTH_M = 2.0
+_BASE_SAFETY_BUFFER_M = 0.5
+_LEAD_LANE_TOLERANCE_M = 2.25
+
+
+@dataclass(slots=True)
+class PlannerCostBreakdown:
+    collision: float = 0.0
+    cone_proximity: float = 0.0
+    lane_deviation: float = 0.0
+    jerk: float = 0.0
+    speed_error: float = 0.0
+    traffic_violation: float = 0.0
+    route_progress: float = 0.0
+    total: float = 0.0
 
 
 @dataclass(slots=True)
@@ -17,6 +38,132 @@ class PlannerCandidate:
     lane_id: str
     target_speed_mps: float
     score: float = 0.0
+    feasible: bool = True
+    reject_reason: str | None = None
+    reference_lane_id: str = ""
+    target_lane_id: str = ""
+    target_d_m: float = 0.0
+    terminal_time_s: float = 0.0
+    cost_breakdown: PlannerCostBreakdown = field(default_factory=PlannerCostBreakdown)
+
+
+@dataclass(slots=True)
+class _ReferencePath:
+    lane_id: str
+    centerline_world: np.ndarray
+    speed_limit_mps: float
+    source_kind: str
+    left_boundary_world: np.ndarray | None = None
+    right_boundary_world: np.ndarray | None = None
+
+
+@dataclass(slots=True)
+class _MotionTarget:
+    target_lane_id: str
+    target_d_m: float
+    target_speed_mps: float
+    terminal_time_s: float
+    target_s_m: float | None = None
+
+
+@dataclass(slots=True)
+class _TrajectorySamples:
+    s: np.ndarray
+    s_dot: np.ndarray
+    s_ddot: np.ndarray
+    s_jerk: np.ndarray
+    d: np.ndarray
+    d_dot: np.ndarray
+    d_ddot: np.ndarray
+    d_jerk: np.ndarray
+    relative_progress_m: np.ndarray
+    world_waypoints: list[Waypoint]
+    max_curvature: float
+
+
+@dataclass(slots=True)
+class _DynamicClearance:
+    min_clearance_m: float
+    min_boundary_clearance_m: float
+
+
+@dataclass(slots=True)
+class _Polynomial:
+    coefficients: np.ndarray
+
+    def value(self, t: float) -> float:
+        return float(np.polyval(self.coefficients[::-1], t))
+
+    def derivative(self, t: float, order: int) -> float:
+        coeffs = self.coefficients.copy()
+        for _ in range(order):
+            coeffs = np.array([index * coeffs[index] for index in range(1, len(coeffs))], dtype=np.float64)
+            if len(coeffs) == 0:
+                return 0.0
+        return float(np.polyval(coeffs[::-1], t))
+
+
+def _solve_quintic(
+    *,
+    x0: float,
+    x_dot0: float,
+    x_ddot0: float,
+    xT: float,
+    x_dotT: float,
+    x_ddotT: float,
+    T: float,
+) -> _Polynomial:
+    a0 = x0
+    a1 = x_dot0
+    a2 = x_ddot0 * 0.5
+    matrix = np.array(
+        [
+            [T**3, T**4, T**5],
+            [3.0 * T**2, 4.0 * T**3, 5.0 * T**4],
+            [6.0 * T, 12.0 * T**2, 20.0 * T**3],
+        ],
+        dtype=np.float64,
+    )
+    rhs = np.array(
+        [
+            xT - (a0 + (a1 * T) + (a2 * T**2)),
+            x_dotT - (a1 + (2.0 * a2 * T)),
+            x_ddotT - (2.0 * a2),
+        ],
+        dtype=np.float64,
+    )
+    a3, a4, a5 = np.linalg.solve(matrix, rhs)
+    return _Polynomial(np.array([a0, a1, a2, a3, a4, a5], dtype=np.float64))
+
+
+def _solve_quartic(
+    *,
+    x0: float,
+    x_dot0: float,
+    x_ddot0: float,
+    x_dotT: float,
+    x_ddotT: float,
+    T: float,
+) -> _Polynomial:
+    a0 = x0
+    a1 = x_dot0
+    a2 = x_ddot0 * 0.5
+    matrix = np.array(
+        [
+            [3.0 * T**2, 4.0 * T**3],
+            [6.0 * T, 12.0 * T**2],
+        ],
+        dtype=np.float64,
+    )
+    rhs = np.array(
+        [
+            x_dotT - (a1 + (2.0 * a2 * T)),
+            x_ddotT - (2.0 * a2),
+        ],
+        dtype=np.float64,
+    )
+    a3, a4 = np.linalg.solve(matrix, rhs)
+    return _Polynomial(np.array([a0, a1, a2, a3, a4], dtype=np.float64))
 
 
 class StubMotionPlanner:
@@ -43,23 +190,46 @@ class StubMotionPlanner:
 
 
 class FrenetMotionPlanner:
-    """Lane-aware local planner with route-following fallback."""
+    """PRD-style Frenet lattice planner with feasibility filtering and weighted costs."""
 
     def __init__(
         self,
         *,
-        horizon_steps: int = 12,
-        dt_s: float = 0.2,
+        horizon_steps: int = _PLANNING_STEPS,
+        dt_s: float = _PLANNING_DT_S,
         cruise_speed_mps: float = 12.0,
+        terminal_times_s: tuple[float, ...] = (3.5, 5.0),
+        max_candidate_count: int = 50,
+        max_curvature_rad_per_m: float = 0.35,
+        max_lateral_jerk_mps3: float = 6.0,
+        max_longitudinal_jerk_mps3: float = 12.0,
     ) -> None:
         self.horizon_steps = horizon_steps
         self.dt_s = dt_s
+        self.planning_horizon_s = float(horizon_steps * dt_s)
         self.cruise_speed_mps = cruise_speed_mps
+        self.terminal_times_s = tuple(sorted(float(value) for value in terminal_times_s))
+        self.max_candidate_count = max_candidate_count
+        self.max_curvature_rad_per_m = max_curvature_rad_per_m
+        self.max_lateral_jerk_mps3 = max_lateral_jerk_mps3
+        self.max_longitudinal_jerk_mps3 = max_longitudinal_jerk_mps3
         self.route_plan = None
         self._fallback = RouteFollowerMotionPlanner(
             target_speed_mps=cruise_speed_mps,
-            horizon_waypoints=horizon_steps,
+            horizon_waypoints=max(horizon_steps, 6),
         )
+        self.last_candidates: list[PlannerCandidate] = []
+
+    def _effective_terminal_times(self) -> list[float]:
+        if self.planning_horizon_s <= 0.0:
+            return [0.1]
+        effective = sorted(
+            {
+                round(min(max(float(value), self.dt_s), self.planning_horizon_s), 4)
+                for value in self.terminal_times_s
+            }
+        )
+        return effective or [round(self.planning_horizon_s, 4)]
 
     def prepare_route(self, simulation, scenario) -> None:
         self._fallback.prepare_route(simulation, scenario)
@@ -72,58 +242,98 @@ class FrenetMotionPlanner:
         predictions: list[AgentPrediction],
         behavior_state: BehaviorState,
     ) -> EgoTrajectory:
-        self.last_candidates: list[PlannerCandidate] = []
-        route_guided = self._route_guided_trajectory(local_map, ego_pose, behavior_state)
-        if route_guided is not None:
-            return route_guided
-        reference_lane = self._reference_lane(local_map, ego_pose)
-        if reference_lane is None:
+        self.last_candidates = []
+        reference_path = self._select_reference_path(local_map, ego_pose, behavior_state)
+        if reference_path is None:
             return self._fallback.run(local_map, ego_pose, predictions, behavior_state)
 
-        candidates = self._generate_candidates(local_map, ego_pose, predictions, behavior_state, reference_lane)
-        if not candidates:
+        motion_targets = self._build_motion_targets(local_map, ego_pose, behavior_state, reference_path)
+        if not motion_targets:
             return self._fallback.run(local_map, ego_pose, predictions, behavior_state)
+
+        candidates = [
+            self._evaluate_candidate(
+                local_map=local_map,
+                ego_pose=ego_pose,
+                predictions=predictions,
+                behavior_state=behavior_state,
+                reference_path=reference_path,
+                target=target,
+            )
+            for target in motion_targets
+        ]
         self.last_candidates = candidates
-        best = min(candidates, key=lambda candidate: candidate.score)
-        return best.trajectory
 
-    def _route_guided_trajectory(
+        feasible_candidates = [candidate for candidate in candidates if candidate.feasible]
+        if feasible_candidates:
+            best = min(feasible_candidates, key=lambda candidate: candidate.score)
+            best.trajectory.cost = float(best.score)
+            return best.trajectory
+
+        stop_candidate = self._synthesize_stop_candidate(
+            local_map=local_map,
+            ego_pose=ego_pose,
+            predictions=predictions,
+            behavior_state=behavior_state,
+            reference_path=reference_path,
+        )
+        if stop_candidate is not None:
+            self.last_candidates.append(stop_candidate)
+            stop_candidate.trajectory.cost = float(stop_candidate.score)
+            return stop_candidate.trajectory
+
+        return self._fallback.run(local_map, ego_pose, predictions, behavior_state)
+
+    def _select_reference_path(
         self,
         local_map: LocalMap,
         ego_pose: EgoPose,
         behavior_state: BehaviorState,
-    ) -> EgoTrajectory | None:
-        if self.route_plan is None or behavior_state in {BehaviorState.PREPARE_MERGE, BehaviorState.MERGING}:
+    ) -> _ReferencePath | None:
+        if behavior_state not in {BehaviorState.PREPARE_MERGE, BehaviorState.MERGING}:
+            route_reference = self._route_reference(local_map, ego_pose)
+            if route_reference is not None:
+                return route_reference
+        lane = self._reference_lane(local_map, ego_pose)
+        if lane is None:
             return None
-        base = self._fallback.run(local_map, ego_pose, [], behavior_state)
-        if not base.waypoints:
+        return _ReferencePath(
+            lane_id=lane.lane_id,
+            centerline_world=np.asarray(lane.centerline_world, dtype=np.float32),
+            left_boundary_world=np.asarray(lane.left_boundary_world, dtype=np.float32),
+            right_boundary_world=np.asarray(lane.right_boundary_world, dtype=np.float32),
+            speed_limit_mps=float(lane.speed_limit_mps),
+            source_kind="lane",
+        )
+
+    def _route_reference(self, local_map: LocalMap, ego_pose: EgoPose) -> _ReferencePath | None:
+        if self.route_plan is None or not self.route_plan.waypoints:
             return None
-        target_speed_mps = self._speed_profiles(ego_pose, behavior_state)[0]
-        stop_distance_m = self._stop_distance(local_map, behavior_state)
-        traveled_m = 0.0
-        waypoints: list[Waypoint] = []
-        for index, waypoint in enumerate(base.waypoints):
-            commanded_speed = target_speed_mps
-            if stop_distance_m is not None:
-                remaining = max(stop_distance_m - traveled_m, 0.0)
-                commanded_speed = min(
-                    commanded_speed,
-                    max(remaining / max(self.dt_s * max(len(base.waypoints) - index, 1), 1e-3), 0.0),
-                )
-            waypoints.append(
-                Waypoint(
-                    x=float(waypoint.x),
-                    y=float(waypoint.y),
-                    yaw=float(waypoint.yaw),
-                    velocity=float(commanded_speed),
-                    timestamp=float(index * self.dt_s),
-                )
-            )
-            traveled_m += float(commanded_speed * self.dt_s)
-        return EgoTrajectory(
-            waypoints=waypoints,
-            cost=float(base.cost),
-            behavior_state=base.behavior_state,
+        centerline_world = np.asarray(
+            [[waypoint.x, waypoint.y, waypoint.z] for waypoint in self.route_plan.waypoints],
+            dtype=np.float32,
+        )
+        nearest_lane = self._reference_lane(local_map, ego_pose)
+        speed_limit = (
+            float(nearest_lane.speed_limit_mps)
+            if nearest_lane is not None and nearest_lane.speed_limit_mps > 0.0
+            else self.cruise_speed_mps
+        )
+        return _ReferencePath(
+            lane_id="route_reference",
+            centerline_world=centerline_world,
+            left_boundary_world=(
+                None
+                if nearest_lane is None
+                else np.asarray(nearest_lane.left_boundary_world, dtype=np.float32)
+            ),
+            right_boundary_world=(
+                None
+                if nearest_lane is None
+                else np.asarray(nearest_lane.right_boundary_world, dtype=np.float32)
+            ),
+            speed_limit_mps=speed_limit,
+            source_kind="route",
         )
 
     def _reference_lane(self, local_map: LocalMap, ego_pose: EgoPose):
@@ -141,199 +351,618 @@ class FrenetMotionPlanner:
             ).distance_m,
         )
 
-    def _generate_candidates(
+    def _build_motion_targets(
         self,
+        local_map: LocalMap,
+        ego_pose: EgoPose,
+        behavior_state: BehaviorState,
+        reference_path: _ReferencePath,
+    ) -> list[_MotionTarget]:
+        target_speed_values = self._target_speed_values(ego_pose, behavior_state, reference_path)
+        terminal_times = self._effective_terminal_times()
+        current_lane = self._reference_lane(local_map, ego_pose)
+        stop_progress_m = self._behavior_stop_progress(local_map, ego_pose, behavior_state, current_lane)
+        target_s_m = (
+            None
+            if stop_progress_m is None
+            else float(ego_pose.frenet_s + stop_progress_m)
+        )
+
+        targets: list[_MotionTarget] = []
+        if behavior_state in {BehaviorState.PREPARE_MERGE, BehaviorState.MERGING, BehaviorState.CONSTRUCTION_NAVIGATE}:
+            merge_target_lane = None if current_lane is None else self._adjacent_lane(
+                local_map,
+                current_lane.lane_id,
+                closed_lanes=set(local_map.closed_lanes),
+            )
+            merge_terminal_offset = 0.0
+            if current_lane is not None and merge_target_lane is not None:
+                merge_terminal_offset = self._target_lane_offset_m(
+                    reference_centerline=np.asarray(current_lane.centerline_world, dtype=np.float32),
+                    target_centerline=np.asarray(merge_target_lane.centerline_world, dtype=np.float32),
+                    ego_pose=ego_pose,
+                )
+            target_offsets = (
+                np.linspace(0.0, merge_terminal_offset, 5, dtype=np.float64)
+                if abs(merge_terminal_offset) > 1e-3
+                else np.zeros(5, dtype=np.float64)
+            )
+            for terminal_time_s in terminal_times:
+                for target_speed_mps in target_speed_values:
+                    for target_d_m in target_offsets:
+                        target_lane_id = current_lane.lane_id if merge_target_lane is None or abs(target_d_m) < 1e-3 else merge_target_lane.lane_id
+                        targets.append(
+                            _MotionTarget(
+                                target_lane_id=target_lane_id,
+                                target_d_m=float(target_d_m),
+                                target_speed_mps=float(target_speed_mps),
+                                terminal_time_s=float(terminal_time_s),
+                                target_s_m=target_s_m,
+                            )
+                        )
+        else:
+            lateral_targets = (
+                [0.0]
+                if behavior_state in {
+                    BehaviorState.STOPPING_FOR_RED,
+                    BehaviorState.PEDESTRIAN_YIELD,
+                    BehaviorState.EMERGENCY_YIELD,
+                    BehaviorState.GOAL_REACHED,
+                }
+                else [-1.0, -0.5, 0.0, 0.5, 1.0]
+            )
+            target_lane_id = reference_path.lane_id
+            for terminal_time_s in terminal_times:
+                for target_speed_mps in target_speed_values:
+                    for target_d_m in lateral_targets:
+                        targets.append(
+                            _MotionTarget(
+                                target_lane_id=target_lane_id,
+                                target_d_m=float(target_d_m),
+                                target_speed_mps=float(target_speed_mps),
+                                terminal_time_s=float(terminal_time_s),
+                                target_s_m=target_s_m,
+                            )
+                        )
+
+        if len(targets) <= self.max_candidate_count:
+            return targets
+        ranked = sorted(
+            targets,
+            key=lambda item: (
+                abs(item.target_d_m),
+                abs(item.target_speed_mps - ego_pose.speed_mps),
+                item.terminal_time_s,
+            ),
+        )
+        return ranked[: self.max_candidate_count]
+
+    def _target_speed_values(
+        self,
+        ego_pose: EgoPose,
+        behavior_state: BehaviorState,
+        reference_path: _ReferencePath,
+    ) -> list[float]:
+        speed_limit_mps = max(float(reference_path.speed_limit_mps), 0.0)
+        cruise_target_mps = (
+            speed_limit_mps
+            if self.cruise_speed_mps <= 0.0
+            else min(speed_limit_mps or self.cruise_speed_mps, self.cruise_speed_mps)
+        )
+        if behavior_state == BehaviorState.GOAL_REACHED:
+            values = [0.0]
+        elif behavior_state in {BehaviorState.STOPPING_FOR_RED, BehaviorState.PEDESTRIAN_YIELD}:
+            values = np.linspace(0.0, max(min(ego_pose.speed_mps, cruise_target_mps * 0.4), 2.0), 5).tolist()
+        elif behavior_state == BehaviorState.EMERGENCY_YIELD:
+            values = np.linspace(0.0, max(min(ego_pose.speed_mps, cruise_target_mps * 0.35), 2.0), 5).tolist()
+        elif behavior_state == BehaviorState.INTERSECTION_APPROACH:
+            values = np.linspace(max(cruise_target_mps * 0.25, 2.0), max(cruise_target_mps * 0.6, 4.0), 5).tolist()
+        elif behavior_state == BehaviorState.CONSTRUCTION_NAVIGATE:
+            values = np.linspace(max(cruise_target_mps * 0.2, 2.0), max(cruise_target_mps * 0.45, 4.0), 5).tolist()
+        elif behavior_state in {BehaviorState.PREPARE_MERGE, BehaviorState.MERGING}:
+            values = np.linspace(
+                max(cruise_target_mps * 0.45, 5.0),
+                min(cruise_target_mps, max(ego_pose.speed_mps + 2.0, 6.0)),
+                5,
+            ).tolist()
+        else:
+            lower = max(min(ego_pose.speed_mps, cruise_target_mps * 0.8), 4.0)
+            upper = max(cruise_target_mps, lower)
+            values = np.linspace(lower, upper, 5).tolist()
+        unique_sorted = sorted({round(max(float(value), 0.0), 4) for value in values})
+        return unique_sorted[:5]
+
+    def _behavior_stop_progress(
+        self,
+        local_map: LocalMap,
+        ego_pose: EgoPose,
+        behavior_state: BehaviorState,
+        current_lane,
+    ) -> float | None:
+        if behavior_state in {BehaviorState.INTERSECTION_APPROACH, BehaviorState.STOPPING_FOR_RED}:
+            return self._stop_distance(local_map, behavior_state)
+        if behavior_state in {BehaviorState.PEDESTRIAN_YIELD, BehaviorState.EMERGENCY_YIELD, BehaviorState.GOAL_REACHED}:
+            return self._dynamic_stop_progress(local_map, ego_pose, current_lane)
+        return None
+
+    def _dynamic_stop_progress(self, local_map: LocalMap, ego_pose: EgoPose, current_lane) -> float | None:
+        if current_lane is None:
+            return None
+        ego_projection = project_point_to_centerline(
+            np.asarray(current_lane.centerline_world, dtype=np.float32),
+            ego_pose.world_xyz,
+        )
+        candidates: list[float] = []
+        for detection in local_map.dynamic_agents:
+            world_bbox_3d = np.asarray(detection.world_bbox_3d, dtype=np.float32)
+            center_xyz = np.mean(world_bbox_3d, axis=0)
+            projection = project_point_to_centerline(
+                np.asarray(current_lane.centerline_world, dtype=np.float32),
+                center_xyz,
+            )
+            longitudinal_gap = float(projection.s - ego_projection.s)
+            lateral_gap = float(abs(projection.d))
+            if longitudinal_gap <= 0.0 or lateral_gap > _LEAD_LANE_TOLERANCE_M:
+                continue
+            stopping_buffer_m = (
+                self._ego_radius_m()
+                + self._agent_radius_m(world_bbox_3d)
+                + _BASE_SAFETY_BUFFER_M
+                + 0.25
+            )
+            candidates.append(max(longitudinal_gap - stopping_buffer_m, 0.0))
+        if not candidates:
+            return None
+        return float(min(candidates))
+
+    def _target_lane_offset_m(
+        self,
+        *,
+        reference_centerline: np.ndarray,
+        target_centerline: np.ndarray,
+        ego_pose: EgoPose,
+    ) -> float:
+        reference_projection = project_point_to_centerline(reference_centerline, ego_pose.world_xyz)
+        target_projection = project_point_to_centerline(target_centerline, ego_pose.world_xyz)
+        target_point, _ = sample_centerline_at_s(target_centerline, max(target_projection.s, 0.0))
+        reference_point, reference_heading = sample_centerline_at_s(reference_centerline, max(reference_projection.s, 0.0))
+        normal = np.array([-np.sin(reference_heading), np.cos(reference_heading)], dtype=np.float32)
+        delta_xy = np.asarray(target_point[:2] - reference_point[:2], dtype=np.float32)
+        return float(np.dot(delta_xy, normal))
+
+    def _evaluate_candidate(
+        self,
+        *,
         local_map: LocalMap,
         ego_pose: EgoPose,
         predictions: list[AgentPrediction],
         behavior_state: BehaviorState,
-        reference_lane,
-    ) -> list[PlannerCandidate]:
-        lanes_to_try = [reference_lane]
-        if behavior_state in {BehaviorState.PREPARE_MERGE, BehaviorState.MERGING}:
-            adjacent = self._adjacent_lane(local_map, reference_lane.lane_id, closed_lanes=set(local_map.closed_lanes))
-            if adjacent is not None:
-                lanes_to_try.append(adjacent)
-
-        stop_distance = self._stop_distance(local_map, behavior_state)
-        speed_profiles = self._speed_profiles(ego_pose, behavior_state)
-        candidates: list[PlannerCandidate] = []
-        for lane in lanes_to_try:
-            for target_speed in speed_profiles:
-                trajectory = self._trajectory_for_lane(
-                    current_lane=reference_lane,
-                    target_lane=lane,
-                    ego_pose=ego_pose,
-                    behavior_state=behavior_state,
-                    target_speed_mps=target_speed,
-                    stop_distance_m=stop_distance,
-                )
-                score = self._score_candidate(
-                    trajectory=trajectory,
-                    local_map=local_map,
-                    predictions=predictions,
-                    target_lane_id=lane.lane_id,
-                    reference_lane_id=reference_lane.lane_id,
-                    behavior_state=behavior_state,
-                    stop_distance_m=stop_distance,
-                )
-                candidates.append(
-                    PlannerCandidate(
-                        trajectory=trajectory,
-                        lane_id=lane.lane_id,
-                        target_speed_mps=target_speed,
-                        score=score,
-                    )
-                )
-        return candidates
-
-    def _speed_profiles(self, ego_pose: EgoPose, behavior_state: BehaviorState) -> list[float]:
-        if behavior_state == BehaviorState.GOAL_REACHED:
-            return [0.0]
-        if behavior_state == BehaviorState.STOPPING_FOR_RED:
-            return [0.0, max(ego_pose.speed_mps * 0.35, 1.0)]
-        if behavior_state == BehaviorState.PEDESTRIAN_YIELD:
-            return [0.0, max(ego_pose.speed_mps * 0.2, 0.5)]
-        if behavior_state == BehaviorState.EMERGENCY_YIELD:
-            return [max(ego_pose.speed_mps * 0.3, 1.0), 0.0]
-        if behavior_state == BehaviorState.INTERSECTION_APPROACH:
-            return [max(self.cruise_speed_mps * 0.5, 4.0), max(ego_pose.speed_mps * 0.7, 4.0)]
-        if behavior_state == BehaviorState.CONSTRUCTION_NAVIGATE:
-            return [max(self.cruise_speed_mps * 0.4, 3.0), max(ego_pose.speed_mps * 0.5, 3.0)]
-        if behavior_state in {BehaviorState.PREPARE_MERGE, BehaviorState.MERGING}:
-            return [max(self.cruise_speed_mps * 0.85, 6.0), max(ego_pose.speed_mps, 5.0)]
-        return [self.cruise_speed_mps, max(ego_pose.speed_mps, self.cruise_speed_mps * 0.8)]
-
-    def _trajectory_for_lane(
-        self,
-        *,
-        current_lane,
-        target_lane,
-        ego_pose: EgoPose,
-        behavior_state: BehaviorState,
-        target_speed_mps: float,
-        stop_distance_m: float | None,
-    ) -> EgoTrajectory:
-        current_projection = project_point_to_centerline(current_lane.centerline_world, ego_pose.world_xyz)
-        target_projection = project_point_to_centerline(target_lane.centerline_world, ego_pose.world_xyz)
-        if target_lane.lane_id == current_lane.lane_id:
-            merge_alpha_max = 0.0
-        elif behavior_state == BehaviorState.MERGING:
-            merge_alpha_max = 1.0
-        else:
-            merge_alpha_max = 0.75
-        waypoints: list[Waypoint] = []
-        accumulated_s = current_projection.s
-        for step in range(self.horizon_steps):
-            time_s = step * self.dt_s
-            blended_speed = target_speed_mps
-            if stop_distance_m is not None:
-                remaining = max(stop_distance_m - max(accumulated_s - current_projection.s, 0.0), 0.0)
-                blended_speed = min(blended_speed, max(remaining / max(self.dt_s * max(self.horizon_steps - step, 1), 1e-3), 0.0))
-            accumulated_s += blended_speed * self.dt_s
-            current_point, current_heading = sample_centerline_at_s(current_lane.centerline_world, accumulated_s)
-            target_point, target_heading = sample_centerline_at_s(
-                target_lane.centerline_world,
-                max(target_projection.s, 0.0) + max(accumulated_s - current_projection.s, 0.0),
-            )
-            if merge_alpha_max > 0.0:
-                alpha = min(merge_alpha_max, (step + 1) / max(self.horizon_steps + 2, 1))
-                point = current_point + ((target_point - current_point) * alpha)
-                heading = current_heading + ((target_heading - current_heading) * alpha)
-            else:
-                point = current_point
-                heading = current_heading
-            waypoints.append(
-                Waypoint(
-                    x=float(point[0]),
-                    y=float(point[1]),
-                    yaw=float(heading),
-                    velocity=float(blended_speed),
-                    timestamp=float(time_s),
-                )
-            )
-        return EgoTrajectory(
-            waypoints=waypoints,
+        reference_path: _ReferencePath,
+        target: _MotionTarget,
+    ) -> PlannerCandidate:
+        samples = self._sample_candidate(reference_path, ego_pose, target)
+        trajectory = EgoTrajectory(
+            waypoints=samples.world_waypoints,
             cost=0.0,
             behavior_state=behavior_state,
         )
+        cost_breakdown = PlannerCostBreakdown()
+        candidate = PlannerCandidate(
+            trajectory=trajectory,
+            lane_id=target.target_lane_id,
+            target_speed_mps=target.target_speed_mps,
+            feasible=True,
+            reject_reason=None,
+            reference_lane_id=reference_path.lane_id,
+            target_lane_id=target.target_lane_id,
+            target_d_m=target.target_d_m,
+            terminal_time_s=target.terminal_time_s,
+            cost_breakdown=cost_breakdown,
+        )
 
-    def _score_candidate(
+        reject_reason = self._reject_reason(
+            local_map=local_map,
+            ego_pose=ego_pose,
+            predictions=predictions,
+            behavior_state=behavior_state,
+            reference_path=reference_path,
+            target=target,
+            samples=samples,
+        )
+        if reject_reason is not None:
+            candidate.feasible = False
+            candidate.reject_reason = reject_reason
+            candidate.score = 1_000_000.0 + float(abs(target.target_d_m) * 100.0) + target.target_speed_mps
+            candidate.cost_breakdown.traffic_violation = 1.0 if reject_reason in {"closed_lane", "stop_line_violation"} else 0.0
+            candidate.cost_breakdown.total = float(candidate.score)
+            return candidate
+
+        clearance = self._dynamic_clearance(local_map, predictions, samples)
+        desired_lateral_path = (
+            np.full_like(samples.d, target.target_d_m)
+            if behavior_state in {
+                BehaviorState.PREPARE_MERGE,
+                BehaviorState.MERGING,
+                BehaviorState.CONSTRUCTION_NAVIGATE,
+            }
+            else np.zeros_like(samples.d)
+        )
+        lane_deviation = float(np.mean(np.abs(samples.d - desired_lateral_path)))
+        jerk_term = float(
+            np.mean(np.abs(samples.d_jerk)) + (0.5 * np.mean(np.abs(samples.s_jerk)))
+        )
+        collision_term = max(0.0, min(1.0, (6.0 - clearance.min_clearance_m) / 6.0))
+        boundary_term = max(0.0, min(1.0, (5.0 - clearance.min_boundary_clearance_m) / 5.0))
+        speed_error_term = abs(float(samples.world_waypoints[-1].velocity) - target.target_speed_mps)
+        route_progress_term = -0.05 * float(samples.relative_progress_m[-1])
+        if behavior_state in {
+            BehaviorState.PREPARE_MERGE,
+            BehaviorState.MERGING,
+            BehaviorState.CONSTRUCTION_NAVIGATE,
+        }:
+            route_progress_term -= 2.5 * abs(float(target.target_d_m))
+        total = (
+            (collision_term * 100.0)
+            + (boundary_term * 40.0)
+            + (lane_deviation * 5.0)
+            + (jerk_term * 2.0)
+            + (speed_error_term * 3.0)
+            + route_progress_term
+        )
+
+        candidate.cost_breakdown.collision = float(collision_term)
+        candidate.cost_breakdown.cone_proximity = float(boundary_term)
+        candidate.cost_breakdown.lane_deviation = float(lane_deviation)
+        candidate.cost_breakdown.jerk = float(jerk_term)
+        candidate.cost_breakdown.speed_error = float(speed_error_term)
+        candidate.cost_breakdown.traffic_violation = 0.0
+        candidate.cost_breakdown.route_progress = float(route_progress_term)
+        candidate.cost_breakdown.total = float(total)
+        candidate.score = float(total)
+        candidate.trajectory.cost = float(total)
+        return candidate
+
+    def _sample_candidate(
+        self,
+        reference_path: _ReferencePath,
+        ego_pose: EgoPose,
+        target: _MotionTarget,
+    ) -> _TrajectorySamples:
+        reference_projection = project_point_to_centerline(reference_path.centerline_world, ego_pose.world_xyz)
+        lateral_poly = _solve_quintic(
+            x0=float(reference_projection.d),
+            x_dot0=0.0,
+            x_ddot0=0.0,
+            xT=float(target.target_d_m),
+            x_dotT=0.0,
+            x_ddotT=0.0,
+            T=target.terminal_time_s,
+        )
+        if target.target_s_m is None:
+            longitudinal_poly = _solve_quartic(
+                x0=float(reference_projection.s),
+                x_dot0=max(float(ego_pose.speed_mps), 0.0),
+                x_ddot0=float(ego_pose.acceleration_mps2),
+                x_dotT=float(target.target_speed_mps),
+                x_ddotT=0.0,
+                T=target.terminal_time_s,
+            )
+        else:
+            longitudinal_poly = _solve_quintic(
+                x0=float(reference_projection.s),
+                x_dot0=max(float(ego_pose.speed_mps), 0.0),
+                x_ddot0=float(ego_pose.acceleration_mps2),
+                xT=float(target.target_s_m),
+                x_dotT=float(target.target_speed_mps),
+                x_ddotT=0.0,
+                T=target.terminal_time_s,
+            )
+
+        s_values: list[float] = []
+        s_dot_values: list[float] = []
+        s_ddot_values: list[float] = []
+        s_jerk_values: list[float] = []
+        d_values: list[float] = []
+        d_dot_values: list[float] = []
+        d_ddot_values: list[float] = []
+        d_jerk_values: list[float] = []
+        headings: list[float] = []
+        waypoints: list[Waypoint] = []
+
+        previous_xy: np.ndarray | None = None
+        max_curvature = 0.0
+        for step in range(1, self.horizon_steps + 1):
+            time_s = float(step * self.dt_s)
+            eval_time_s = min(time_s, target.terminal_time_s)
+
+            s_value = longitudinal_poly.value(eval_time_s)
+            s_dot = max(longitudinal_poly.derivative(eval_time_s, 1), 0.0)
+            s_ddot = longitudinal_poly.derivative(eval_time_s, 2)
+            s_jerk = longitudinal_poly.derivative(eval_time_s, 3)
+            if time_s > target.terminal_time_s:
+                delta_t = time_s - target.terminal_time_s
+                s_terminal = longitudinal_poly.value(target.terminal_time_s)
+                s_dot_terminal = max(longitudinal_poly.derivative(target.terminal_time_s, 1), 0.0)
+                if target.target_s_m is not None and target.target_speed_mps <= 0.1:
+                    s_value = s_terminal
+                else:
+                    s_value = s_terminal + (s_dot_terminal * delta_t)
+                s_dot = s_dot_terminal
+                s_ddot = 0.0
+                s_jerk = 0.0
+
+            d_value = lateral_poly.value(eval_time_s)
+            d_dot = lateral_poly.derivative(eval_time_s, 1)
+            d_ddot = lateral_poly.derivative(eval_time_s, 2)
+            d_jerk = lateral_poly.derivative(eval_time_s, 3)
+            if time_s > target.terminal_time_s:
+                d_value = float(target.target_d_m)
+                d_dot = 0.0
+                d_ddot = 0.0
+                d_jerk = 0.0
+
+            center_point, center_heading = sample_centerline_at_s(reference_path.centerline_world, s_value)
+            normal = np.array([-np.sin(center_heading), np.cos(center_heading), 0.0], dtype=np.float32)
+            world_point = np.asarray(center_point, dtype=np.float32) + (normal * d_value)
+            world_heading = float(center_heading + np.arctan2(d_dot, max(s_dot, 1e-3)))
+            waypoint = Waypoint(
+                x=float(world_point[0]),
+                y=float(world_point[1]),
+                yaw=float(world_heading),
+                velocity=float(max(s_dot, 0.0)),
+                timestamp=float(time_s),
+            )
+            waypoints.append(waypoint)
+            headings.append(world_heading)
+
+            current_xy = np.array([waypoint.x, waypoint.y], dtype=np.float32)
+            if previous_xy is not None:
+                segment_distance = max(distance_xy(previous_xy, current_xy), 1e-3)
+                curvature = abs(world_heading - headings[-2]) / segment_distance
+                max_curvature = max(max_curvature, float(curvature))
+            previous_xy = current_xy
+
+            s_values.append(float(s_value))
+            s_dot_values.append(float(s_dot))
+            s_ddot_values.append(float(s_ddot))
+            s_jerk_values.append(float(s_jerk))
+            d_values.append(float(d_value))
+            d_dot_values.append(float(d_dot))
+            d_ddot_values.append(float(d_ddot))
+            d_jerk_values.append(float(d_jerk))
+
+        relative_progress = np.asarray(s_values, dtype=np.float64) - float(reference_projection.s)
+        return _TrajectorySamples(
+            s=np.asarray(s_values, dtype=np.float64),
+            s_dot=np.asarray(s_dot_values, dtype=np.float64),
+            s_ddot=np.asarray(s_ddot_values, dtype=np.float64),
+            s_jerk=np.asarray(s_jerk_values, dtype=np.float64),
+            d=np.asarray(d_values, dtype=np.float64),
+            d_dot=np.asarray(d_dot_values, dtype=np.float64),
+            d_ddot=np.asarray(d_ddot_values, dtype=np.float64),
+            d_jerk=np.asarray(d_jerk_values, dtype=np.float64),
+            relative_progress_m=relative_progress,
+            world_waypoints=waypoints,
+            max_curvature=float(max_curvature),
+        )
+
+    def _reject_reason(
         self,
         *,
-        trajectory: EgoTrajectory,
+        local_map: LocalMap,
+        ego_pose: EgoPose,
+        predictions: list[AgentPrediction],
+        behavior_state: BehaviorState,
+        reference_path: _ReferencePath,
+        target: _MotionTarget,
+        samples: _TrajectorySamples,
+    ) -> str | None:
+        if target.target_lane_id in set(local_map.closed_lanes):
+            return "closed_lane"
+        if samples.max_curvature > self.max_curvature_rad_per_m:
+            return "curvature_limit"
+        if np.max(np.abs(samples.d_jerk)) > self.max_lateral_jerk_mps3:
+            return "lateral_jerk_limit"
+        if np.max(np.abs(samples.s_jerk)) > self.max_longitudinal_jerk_mps3:
+            return "longitudinal_jerk_limit"
+        if self._corridor_violation(reference_path, target, samples):
+            return "corridor_violation"
+        if self._temporary_boundary_violation(local_map, samples):
+            return "temporary_boundary"
+        if self._stop_line_violation(local_map, behavior_state, samples):
+            return "stop_line_violation"
+        if self._dynamic_collision_violation(local_map, predictions, samples):
+            return "dynamic_collision"
+        if np.any(samples.relative_progress_m < -0.1):
+            return "reverse_progress"
+        return None
+
+    def _corridor_violation(
+        self,
+        reference_path: _ReferencePath,
+        target: _MotionTarget,
+        samples: _TrajectorySamples,
+    ) -> bool:
+        if reference_path.source_kind == "route":
+            corridor_limit = max(abs(target.target_d_m) + 1.5, 2.75)
+        else:
+            lane_half_width = self._reference_lane_half_width(reference_path)
+            corridor_limit = max(lane_half_width + max(abs(target.target_d_m), 0.0), lane_half_width + 0.35)
+        return bool(np.any(np.abs(samples.d) > corridor_limit))
+
+    def _stop_line_violation(
+        self,
+        local_map: LocalMap,
+        behavior_state: BehaviorState,
+        samples: _TrajectorySamples,
+    ) -> bool:
+        stop_distance_m = self._stop_distance(local_map, behavior_state)
+        if stop_distance_m is None:
+            return False
+        safe_stop_progress = max(stop_distance_m - 1.0, 0.0)
+        if float(np.max(samples.relative_progress_m)) <= safe_stop_progress:
+            return False
+        final_speed = float(samples.world_waypoints[-1].velocity)
+        return final_speed > 0.25 or float(np.max(samples.relative_progress_m)) > (stop_distance_m + 0.25)
+
+    def _temporary_boundary_violation(self, local_map: LocalMap, samples: _TrajectorySamples) -> bool:
+        if not local_map.temporary_boundaries:
+            return False
+        for lane in local_map.temporary_boundaries:
+            polyline = np.asarray(lane.polyline_world, dtype=np.float32)
+            if len(polyline) < 2:
+                continue
+            for waypoint in samples.world_waypoints:
+                point_xy = np.array([waypoint.x, waypoint.y], dtype=np.float32)
+                if self._distance_to_polyline(point_xy, polyline[:, :2]) < 0.35:
+                    return True
+        return False
+
+    def _dynamic_collision_violation(
+        self,
         local_map: LocalMap,
         predictions: list[AgentPrediction],
-        target_lane_id: str,
-        reference_lane_id: str,
-        behavior_state: BehaviorState,
-        stop_distance_m: float | None,
-    ) -> float:
-        if not trajectory.waypoints:
-            return float("inf")
-        target_lane = next((lane for lane in local_map.static_lanes if lane.lane_id == target_lane_id), None)
-        if target_lane is None:
-            return float("inf")
+        samples: _TrajectorySamples,
+    ) -> bool:
+        safety_margins = self._prediction_safety_map(local_map, predictions)
+        for index, waypoint in enumerate(samples.world_waypoints):
+            ego_xy = np.array([waypoint.x, waypoint.y], dtype=np.float32)
+            for _track_id, agent_xy, safety_margin_m in self._dynamic_samples(local_map, predictions, safety_margins, index):
+                if distance_xy(ego_xy, agent_xy) < safety_margin_m:
+                    return True
+        return False
 
-        score = 0.0
-        if target_lane_id in local_map.closed_lanes:
-            score += 1000.0
-        if behavior_state in {BehaviorState.PREPARE_MERGE, BehaviorState.MERGING} and target_lane_id == reference_lane_id:
-            score += 20.0
+    def _dynamic_clearance(
+        self,
+        local_map: LocalMap,
+        predictions: list[AgentPrediction],
+        samples: _TrajectorySamples,
+    ) -> _DynamicClearance:
+        min_clearance_m = float("inf")
+        safety_margins = self._prediction_safety_map(local_map, predictions)
+        for index, waypoint in enumerate(samples.world_waypoints):
+            ego_xy = np.array([waypoint.x, waypoint.y], dtype=np.float32)
+            for _track_id, agent_xy, safety_margin_m in self._dynamic_samples(local_map, predictions, safety_margins, index):
+                clearance_m = distance_xy(ego_xy, agent_xy) - safety_margin_m
+                min_clearance_m = min(min_clearance_m, float(clearance_m))
 
-        lane_offset_sum = 0.0
-        progress_reward = 0.0
-        min_clearance = float("inf")
-        previous_yaw = trajectory.waypoints[0].yaw
-        smoothness_penalty = 0.0
-        for index, waypoint in enumerate(trajectory.waypoints):
-            projection = project_point_to_centerline(
-                target_lane.centerline_world,
-                np.array([waypoint.x, waypoint.y, 0.0], dtype=np.float32),
-            )
-            lane_offset_sum += abs(projection.d)
-            progress_reward += projection.s
-            if index:
-                smoothness_penalty += abs(waypoint.yaw - previous_yaw)
-            previous_yaw = waypoint.yaw
-            for prediction in predictions:
-                if index >= len(prediction.predicted_trajectory):
+        boundary_points: list[np.ndarray] = []
+        for cone in local_map.cone_instances:
+            boundary_points.append(np.asarray(cone.world_xyz[:2], dtype=np.float32))
+        min_boundary_clearance_m = float("inf")
+        if boundary_points:
+            for waypoint in samples.world_waypoints:
+                waypoint_xy = np.array([waypoint.x, waypoint.y], dtype=np.float32)
+                for cone_xy in boundary_points:
+                    min_boundary_clearance_m = min(min_boundary_clearance_m, float(distance_xy(waypoint_xy, cone_xy)))
+        elif local_map.temporary_boundaries:
+            for lane in local_map.temporary_boundaries:
+                polyline = np.asarray(lane.polyline_world, dtype=np.float32)
+                if len(polyline) < 2:
                     continue
-                predicted_waypoint = prediction.predicted_trajectory[index]
-                clearance = distance_xy(
-                    np.array([waypoint.x, waypoint.y], dtype=np.float32),
-                    np.array([predicted_waypoint.x, predicted_waypoint.y], dtype=np.float32),
-                )
-                # Widen the safety margin using prediction uncertainty when available
-                uncertainty_radius = 0.0
-                if (
-                    prediction.covariance_by_step is not None
-                    and index < len(prediction.covariance_by_step)
-                ):
-                    cov = prediction.covariance_by_step[index]
-                    uncertainty_radius = float(
-                        np.sqrt(max(float(cov[0, 0]), float(cov[1, 1])))
+                for waypoint in samples.world_waypoints:
+                    waypoint_xy = np.array([waypoint.x, waypoint.y], dtype=np.float32)
+                    min_boundary_clearance_m = min(
+                        min_boundary_clearance_m,
+                        self._distance_to_polyline(waypoint_xy, polyline[:, :2]),
                     )
-                effective_clearance = clearance - uncertainty_radius
-                min_clearance = min(min_clearance, effective_clearance)
 
-        score += lane_offset_sum * 5.0
-        score += smoothness_penalty * 2.0
-        score -= progress_reward * 0.05
-        if min_clearance < 4.0:
-            score += (4.0 - min_clearance) * 250.0
-        elif min_clearance < 8.0:
-            score += (8.0 - min_clearance) * 20.0
+        if not np.isfinite(min_clearance_m):
+            min_clearance_m = 20.0
+        if not np.isfinite(min_boundary_clearance_m):
+            min_boundary_clearance_m = 20.0
+        return _DynamicClearance(
+            min_clearance_m=float(min_clearance_m),
+            min_boundary_clearance_m=float(min_boundary_clearance_m),
+        )
 
-        if stop_distance_m is not None:
-            projected_progress = sum(waypoint.velocity for waypoint in trajectory.waypoints) * self.dt_s
-            if projected_progress > stop_distance_m:
-                score += (projected_progress - stop_distance_m) * 50.0
-            if behavior_state == BehaviorState.STOPPING_FOR_RED:
-                score += abs(trajectory.waypoints[-1].velocity) * 20.0
+    def _prediction_safety_map(
+        self,
+        local_map: LocalMap,
+        predictions: list[AgentPrediction],
+    ) -> dict[int, float]:
+        detections_by_track = {int(agent.track_id): agent for agent in local_map.dynamic_agents}
+        safety_by_track: dict[int, float] = {}
+        ego_radius = self._ego_radius_m()
+        for track_id, detection in detections_by_track.items():
+            safety_by_track[track_id] = (
+                ego_radius
+                + self._agent_radius_m(np.asarray(detection.world_bbox_3d, dtype=np.float32))
+                + _BASE_SAFETY_BUFFER_M
+            )
+        for prediction in predictions:
+            covariance_padding = 0.0
+            if prediction.covariance_by_step:
+                cov = np.asarray(prediction.covariance_by_step[0], dtype=np.float32)
+                covariance_padding = float(np.sqrt(max(float(cov[0, 0]), float(cov[1, 1]))))
+            safety_by_track[int(prediction.track_id)] = max(
+                safety_by_track.get(int(prediction.track_id), ego_radius + 1.2 + _BASE_SAFETY_BUFFER_M),
+                ego_radius + 1.2 + _BASE_SAFETY_BUFFER_M + covariance_padding,
+            )
+        return safety_by_track
 
-        trajectory.cost = float(max(score, 0.0))
-        return trajectory.cost
+    def _dynamic_samples(
+        self,
+        local_map: LocalMap,
+        predictions: list[AgentPrediction],
+        safety_margins: dict[int, float],
+        index: int,
+    ):
+        yielded_tracks: set[int] = set()
+        for prediction in predictions:
+            if prediction.predicted_trajectory:
+                sample_index = min(index, len(prediction.predicted_trajectory) - 1)
+                predicted_waypoint = prediction.predicted_trajectory[sample_index]
+                yielded_tracks.add(int(prediction.track_id))
+                yield (
+                    int(prediction.track_id),
+                    np.array([predicted_waypoint.x, predicted_waypoint.y], dtype=np.float32),
+                    float(safety_margins.get(int(prediction.track_id), self._ego_radius_m() + 1.2)),
+                )
+        for detection in local_map.dynamic_agents:
+            track_id = int(detection.track_id)
+            if track_id in yielded_tracks:
+                continue
+            centroid_xy = np.mean(np.asarray(detection.world_bbox_3d, dtype=np.float32)[:, :2], axis=0).astype(np.float32)
+            yield (
+                track_id,
+                centroid_xy,
+                float(safety_margins.get(track_id, self._ego_radius_m() + 1.2)),
+            )
+
+    def _synthesize_stop_candidate(
+        self,
+        *,
+        local_map: LocalMap,
+        ego_pose: EgoPose,
+        predictions: list[AgentPrediction],
+        behavior_state: BehaviorState,
+        reference_path: _ReferencePath,
+    ) -> PlannerCandidate | None:
+        stop_progress_m = self._behavior_stop_progress(
+            local_map,
+            ego_pose,
+            behavior_state,
+            self._reference_lane(local_map, ego_pose),
+        )
+        stop_target = _MotionTarget(
+            target_lane_id=reference_path.lane_id,
+            target_d_m=0.0,
+            target_speed_mps=0.0,
+            terminal_time_s=max(self._effective_terminal_times()),
+            target_s_m=None if stop_progress_m is None else float(ego_pose.frenet_s + stop_progress_m),
+        )
+        candidate = self._evaluate_candidate(
+            local_map=local_map,
+            ego_pose=ego_pose,
+            predictions=predictions,
+            behavior_state=behavior_state,
+            reference_path=reference_path,
+            target=stop_target,
+        )
+        if candidate.feasible:
+            return candidate
+        return None
 
     def _stop_distance(self, local_map: LocalMap, behavior_state: BehaviorState) -> float | None:
         if behavior_state not in {BehaviorState.INTERSECTION_APPROACH, BehaviorState.STOPPING_FOR_RED}:
@@ -365,3 +994,39 @@ class FrenetMotionPlanner:
         if not candidates:
             return None
         return min(candidates, key=lambda segment: abs(parse_lane_id(segment.lane_id)[2] - lane_index))
+
+    def _reference_lane_half_width(self, reference_path: _ReferencePath) -> float:
+        if reference_path.left_boundary_world is None or reference_path.right_boundary_world is None:
+            return 1.75
+        left = np.asarray(reference_path.left_boundary_world, dtype=np.float32)
+        right = np.asarray(reference_path.right_boundary_world, dtype=np.float32)
+        if len(left) == 0 or len(right) == 0:
+            return 1.75
+        return max(float(np.mean(np.linalg.norm(left[:, :2] - right[:, :2], axis=1)) * 0.5), 1.5)
+
+    def _ego_radius_m(self) -> float:
+        return float(np.hypot(_EGO_LENGTH_M, _EGO_WIDTH_M)) * 0.5
+
+    def _agent_radius_m(self, world_bbox_3d: np.ndarray) -> float:
+        if world_bbox_3d.shape != (8, 3):
+            return 1.2
+        size_xy = np.max(world_bbox_3d[:, :2], axis=0) - np.min(world_bbox_3d[:, :2], axis=0)
+        return float(np.hypot(float(size_xy[0]), float(size_xy[1]))) * 0.5
+
+    def _distance_to_polyline(self, point_xy: np.ndarray, polyline_xy: np.ndarray) -> float:
+        if len(polyline_xy) < 2:
+            return float("inf")
+        best_distance = float("inf")
+        for start, end in zip(polyline_xy[:-1], polyline_xy[1:], strict=False):
+            segment = end - start
+            segment_length_sq = float(np.dot(segment, segment))
+            if segment_length_sq <= 1e-6:
+                best_distance = min(best_distance, float(distance_xy(point_xy, start)))
+                continue
+            t = float(np.clip(np.dot(point_xy - start, segment) / segment_length_sq, 0.0, 1.0))
+            projection = start + (segment * t)
+            best_distance = min(best_distance, float(distance_xy(point_xy, projection)))
+        return float(best_distance)
+
+
+StanleyPidController = RouteFollowerController

@@ -437,12 +437,29 @@ def _serialize_candidates_for_dashboard(candidates: Any) -> list[dict[str, Any]]
         return []
     serialized: list[dict[str, Any]] = []
     for candidate in list(candidates):
+        cost_breakdown = getattr(candidate, "cost_breakdown", None)
         serialized.append(
             {
                 "trajectory": _serialize_ego_trajectory_for_dashboard(getattr(candidate, "trajectory", None)),
                 "lane_id": getattr(candidate, "lane_id", ""),
                 "target_speed_mps": getattr(candidate, "target_speed_mps", 0.0),
                 "score": getattr(candidate, "score", 0.0),
+                "feasible": getattr(candidate, "feasible", True),
+                "reject_reason": getattr(candidate, "reject_reason", None),
+                "reference_lane_id": getattr(candidate, "reference_lane_id", ""),
+                "target_lane_id": getattr(candidate, "target_lane_id", ""),
+                "target_d_m": getattr(candidate, "target_d_m", 0.0),
+                "terminal_time_s": getattr(candidate, "terminal_time_s", 0.0),
+                "cost_breakdown": {
+                    "collision": getattr(cost_breakdown, "collision", 0.0),
+                    "cone_proximity": getattr(cost_breakdown, "cone_proximity", 0.0),
+                    "lane_deviation": getattr(cost_breakdown, "lane_deviation", 0.0),
+                    "jerk": getattr(cost_breakdown, "jerk", 0.0),
+                    "speed_error": getattr(cost_breakdown, "speed_error", 0.0),
+                    "traffic_violation": getattr(cost_breakdown, "traffic_violation", 0.0),
+                    "route_progress": getattr(cost_breakdown, "route_progress", 0.0),
+                    "total": getattr(cost_breakdown, "total", getattr(candidate, "score", 0.0)),
+                },
             }
         )
     return serialize(serialized)
