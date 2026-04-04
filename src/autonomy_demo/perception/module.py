@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 from collections import Counter
 
@@ -35,6 +36,100 @@ from autonomy_demo.perception.tracking import KalmanSortTracker, SimpleSortTrack
 # Lazy imports for learned perception (optional heavy dependencies)
 _segformer_cls = None
 _learned_lane_cls = None
+
+
+@dataclass(slots=True)
+class _PerceptionAuxPolicy:
+    policy: str = "max_fidelity"
+    enable_segformer: bool = True
+    enable_learned_lanes: bool = True
+    allow_online_lane_training: bool = True
+    segformer_run_every_n_ticks: int = 5
+    lane_run_every_n_ticks: int = 1
+    segformer_max_input_long_edge_px: int | None = None
+
+
+def _resolve_perception_aux_policy(runtime_config) -> _PerceptionAuxPolicy:
+    tuning = dict(getattr(runtime_config, "tuning", {}) or {})
+    aux_tuning = dict(tuning.get("perception_aux", {}) or {})
+    policy_name = str(aux_tuning.get("policy") or "aggressive_budget").strip().lower()
+    is_live = str(getattr(runtime_config, "backend", "stub")).lower() == "carla"
+    device = str(getattr(runtime_config, "perception_device", "cpu")).lower()
+    enable_learned = bool(getattr(runtime_config, "enable_learned_perception", True))
+
+    if is_live:
+        if policy_name == "aggressive_budget":
+            if device == "cpu":
+                policy = _PerceptionAuxPolicy(
+                    policy="aggressive_budget",
+                    enable_segformer=False,
+                    enable_learned_lanes=False,
+                    allow_online_lane_training=False,
+                    segformer_run_every_n_ticks=10,
+                    lane_run_every_n_ticks=10,
+                    segformer_max_input_long_edge_px=512,
+                )
+            else:
+                policy = _PerceptionAuxPolicy(
+                    policy="aggressive_budget",
+                    enable_segformer=True,
+                    enable_learned_lanes=False,
+                    allow_online_lane_training=False,
+                    segformer_run_every_n_ticks=10,
+                    lane_run_every_n_ticks=10,
+                    segformer_max_input_long_edge_px=512,
+                )
+        elif policy_name == "balanced":
+            policy = _PerceptionAuxPolicy(
+                policy="balanced",
+                enable_segformer=device != "cpu",
+                enable_learned_lanes=False,
+                allow_online_lane_training=False,
+                segformer_run_every_n_ticks=5,
+                lane_run_every_n_ticks=5,
+                segformer_max_input_long_edge_px=768,
+            )
+        else:
+            policy = _PerceptionAuxPolicy(
+                policy="max_fidelity",
+                enable_segformer=enable_learned,
+                enable_learned_lanes=enable_learned and device != "cpu",
+                allow_online_lane_training=device != "cpu",
+                segformer_run_every_n_ticks=1,
+                lane_run_every_n_ticks=1,
+                segformer_max_input_long_edge_px=None,
+            )
+    else:
+        policy = _PerceptionAuxPolicy(
+            policy=policy_name,
+            enable_segformer=enable_learned,
+            enable_learned_lanes=enable_learned,
+            allow_online_lane_training=True,
+            segformer_run_every_n_ticks=5,
+            lane_run_every_n_ticks=1,
+            segformer_max_input_long_edge_px=None,
+        )
+
+    if "enable_segformer" in aux_tuning:
+        policy.enable_segformer = bool(aux_tuning["enable_segformer"])
+    if "enable_learned_lanes" in aux_tuning:
+        policy.enable_learned_lanes = bool(aux_tuning["enable_learned_lanes"])
+    if "allow_online_lane_training" in aux_tuning:
+        policy.allow_online_lane_training = bool(aux_tuning["allow_online_lane_training"])
+    if "segformer_run_every_n_ticks" in aux_tuning:
+        policy.segformer_run_every_n_ticks = max(int(aux_tuning["segformer_run_every_n_ticks"]), 1)
+    if "lane_run_every_n_ticks" in aux_tuning:
+        policy.lane_run_every_n_ticks = max(int(aux_tuning["lane_run_every_n_ticks"]), 1)
+    if "segformer_max_input_long_edge_px" in aux_tuning:
+        value = aux_tuning["segformer_max_input_long_edge_px"]
+        policy.segformer_max_input_long_edge_px = None if value in {None, 0, "0"} else int(value)
+
+    if not enable_learned:
+        policy.enable_segformer = False
+        policy.enable_learned_lanes = False
+        policy.allow_online_lane_training = False
+
+    return policy
 
 
 def _get_segformer_class():
@@ -221,6 +316,8 @@ class _CameraSceneContextMixin:
         ego_xyz = np.asarray(bundle.gnss.world_xyz, dtype=np.float32)
         ego_yaw = float(bundle.metadata.get("ego_yaw_rad", 0.0))
         ego_yaw_rate = float(bundle.imu.gyro_xyz[2])
+        bundle.metadata["drivable_inference_ms"] = 0.0
+        bundle.metadata["lane_inference_ms"] = 0.0
 
         # --- Drivable space: try learned model first, fall back to heuristic ---
         drivable_space = None
@@ -231,7 +328,8 @@ class _CameraSceneContextMixin:
             )
             if drivable_space is not None:
                 bundle.metadata["drivable_source"] = "segformer"
-                bundle.metadata["drivable_inference_ms"] = learned_drivable_extractor.last_inference_ms
+                if getattr(learned_drivable_extractor, "ran_inference_last_call", False):
+                    bundle.metadata["drivable_inference_ms"] = learned_drivable_extractor.last_inference_ms
         if drivable_space is None:
             drivable_space = drivable_extractor.extract(
                 bundle.front_camera.frame,
@@ -262,10 +360,15 @@ class _CameraSceneContextMixin:
             if learned_lanes is not None:
                 lanes = learned_lanes
                 bundle.metadata["lane_source"] = "learned"
-                bundle.metadata["lane_inference_ms"] = learned_lane_extractor.last_inference_ms
+                if getattr(learned_lane_extractor, "ran_inference_last_call", False):
+                    bundle.metadata["lane_inference_ms"] = learned_lane_extractor.last_inference_ms
             else:
                 bundle.metadata.setdefault("lane_source", "heuristic")
-                if hasattr(learned_lane_extractor, "is_trained"):
+                if hasattr(learned_lane_extractor, "is_trained") and getattr(
+                    learned_lane_extractor,
+                    "_allow_online_training",
+                    False,
+                ):
                     bundle.metadata["lane_model_warmup"] = not learned_lane_extractor.is_trained
         else:
             bundle.metadata.setdefault("lane_source", "heuristic")
@@ -276,20 +379,36 @@ class _CameraSceneContextMixin:
 class PerceptionStack(_CameraSceneContextMixin):
     """Camera-first perception v1 with YOLO-primary detections and explicit bootstrap fallback."""
 
-    def __init__(self, *, device: str, model_variant: str, enable_learned_perception: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        device: str,
+        model_variant: str,
+        enable_learned_perception: bool = True,
+        aux_policy: _PerceptionAuxPolicy | None = None,
+    ) -> None:
         self.detector = YoloObjectDetector(model_variant=model_variant, device=device)
         self.tracker = KalmanSortTracker()
         self.lane_extractor = LaneExtractor()
         self.drivable_extractor = DrivableSpaceExtractor()
         self.learned_drivable_extractor = None
         self.learned_lane_extractor = None
+        self.aux_policy = aux_policy or _PerceptionAuxPolicy()
         if enable_learned_perception:
             segformer_cls = _get_segformer_class()
-            if segformer_cls is not None:
-                self.learned_drivable_extractor = segformer_cls(device=device)
+            if segformer_cls is not None and self.aux_policy.enable_segformer:
+                self.learned_drivable_extractor = segformer_cls(
+                    device=device,
+                    run_every_n_ticks=self.aux_policy.segformer_run_every_n_ticks,
+                    max_input_long_edge_px=self.aux_policy.segformer_max_input_long_edge_px,
+                )
             learned_lane_cls = _get_learned_lane_class()
-            if learned_lane_cls is not None:
-                self.learned_lane_extractor = learned_lane_cls(device=device)
+            if learned_lane_cls is not None and self.aux_policy.enable_learned_lanes:
+                self.learned_lane_extractor = learned_lane_cls(
+                    device=device,
+                    run_every_n_ticks=self.aux_policy.lane_run_every_n_ticks,
+                    allow_online_training=self.aux_policy.allow_online_lane_training,
+                )
         self.logger = get_logger(__name__, perception_mode="camera_v1")
         self._camera_order = ("front_camera", "left_camera", "right_camera", "rear_camera")
 
@@ -605,8 +724,20 @@ class LidarPerceptionStack(_CameraSceneContextMixin):
 class FusedPerceptionStack(_CameraSceneContextMixin):
     """Object-level camera/LiDAR fusion with camera lanes and LiDAR geometry preference."""
 
-    def __init__(self, *, device: str, model_variant: str, enable_learned_perception: bool = True) -> None:
-        self.camera_stack = PerceptionStack(device=device, model_variant=model_variant, enable_learned_perception=enable_learned_perception)
+    def __init__(
+        self,
+        *,
+        device: str,
+        model_variant: str,
+        enable_learned_perception: bool = True,
+        aux_policy: _PerceptionAuxPolicy | None = None,
+    ) -> None:
+        self.camera_stack = PerceptionStack(
+            device=device,
+            model_variant=model_variant,
+            enable_learned_perception=enable_learned_perception,
+            aux_policy=aux_policy,
+        )
         self.lidar_stack = LidarPerceptionStack()
         self.lane_extractor = self.camera_stack.lane_extractor
         self.drivable_extractor = self.camera_stack.drivable_extractor
@@ -728,11 +859,13 @@ class FusedPerceptionStack(_CameraSceneContextMixin):
 
 def build_perception_module(runtime_config):
     enable_learned = getattr(runtime_config, "enable_learned_perception", True)
+    aux_policy = _resolve_perception_aux_policy(runtime_config)
     if runtime_config.perception_mode == "camera_v1":
         return PerceptionStack(
             device=runtime_config.perception_device,
             model_variant=runtime_config.perception_model_variant,
             enable_learned_perception=enable_learned,
+            aux_policy=aux_policy,
         )
     if runtime_config.perception_mode == "lidar_v1":
         return LidarPerceptionStack()
@@ -741,5 +874,6 @@ def build_perception_module(runtime_config):
             device=runtime_config.perception_device,
             model_variant=runtime_config.perception_model_variant,
             enable_learned_perception=enable_learned,
+            aux_policy=aux_policy,
         )
     return StubPerceptionModule()

@@ -108,11 +108,8 @@ class PipelineRuntime:
                 detections, lanes, drivable_space, traffic_lights, _cones = self.perception.run(bundle)
                 t1 = _time_ms()
                 latency.record("perception", t1 - t0)
-                # Record learned perception sub-latencies if available
-                if "drivable_inference_ms" in bundle.metadata:
-                    latency.record("segformer_drivable", bundle.metadata["drivable_inference_ms"])
-                if "lane_inference_ms" in bundle.metadata:
-                    latency.record("learned_lanes", bundle.metadata["lane_inference_ms"])
+                latency.record("segformer_drivable", float(bundle.metadata.get("drivable_inference_ms", 0.0)))
+                latency.record("learned_lanes", float(bundle.metadata.get("lane_inference_ms", 0.0)))
 
                 bundle.metadata["debug_perception_detections"] = detections
                 if self.visualization and hasattr(self.visualization, "update_bundle"):
@@ -226,8 +223,7 @@ class PipelineRuntime:
                 tick_latency = latency.latest()
                 tick_latency["total"] = sum(float(tick_latency.get(key, 0.0)) for key in _TOP_LEVEL_LATENCY_KEYS)
                 auxiliary_total = sum(float(tick_latency.get(key, 0.0)) for key in _AUXILIARY_LATENCY_KEYS)
-                if auxiliary_total > 0.0:
-                    tick_latency["perception_aux_total"] = auxiliary_total
+                tick_latency["perception_aux_total"] = auxiliary_total
                 self.context.event_bus.publish(TopicName.PIPELINE_LATENCY.value, tick_latency)
 
                 self.context.event_bus.publish(
