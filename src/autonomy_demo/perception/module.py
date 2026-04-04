@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from collections import Counter
 
@@ -28,6 +28,7 @@ from autonomy_demo.perception.lane_extraction import LaneExtractor
 from autonomy_demo.perception.lidar_detection import LidarObstacleDetector
 from autonomy_demo.perception.lidar_tracking import KalmanCentroidTracker3D, SimpleCentroidTracker3D
 from autonomy_demo.perception.object_detection import (
+    CameraInferenceRequest,
     YoloObjectDetector,
     bootstrap_annotations_from_metadata,
 )
@@ -47,6 +48,30 @@ class _PerceptionAuxPolicy:
     segformer_run_every_n_ticks: int = 5
     lane_run_every_n_ticks: int = 1
     segformer_max_input_long_edge_px: int | None = None
+
+
+@dataclass(slots=True)
+class _PerceptionCameraBudgetPolicy:
+    policy: str = "max_fidelity"
+    enable_batch_inference: bool = False
+    front_run_every_n_ticks: int = 1
+    side_run_every_n_ticks: int = 1
+    rear_run_every_n_ticks: int = 1
+    front_max_input_long_edge_px: int | None = None
+    surround_max_input_long_edge_px: int | None = None
+    promotion_window_ticks: int = 10
+    side_promotion_distance_m: float = 15.0
+    rear_promotion_distance_m: float = 20.0
+    skip_stale_frames: bool = False
+
+
+@dataclass(slots=True)
+class _CameraRuntimeState:
+    last_inferred_frame_id: int | None = None
+    last_inference_tick: int = -1
+    promotion_until_tick: int = -1
+    last_detector_mode: str = "bootstrap"
+    last_raw_detections: list[FrameDetection2D] = field(default_factory=list)
 
 
 def _resolve_perception_aux_policy(runtime_config) -> _PerceptionAuxPolicy:
@@ -130,6 +155,137 @@ def _resolve_perception_aux_policy(runtime_config) -> _PerceptionAuxPolicy:
         policy.allow_online_lane_training = False
 
     return policy
+
+
+def _resolve_perception_camera_budget_policy(runtime_config) -> _PerceptionCameraBudgetPolicy:
+    tuning = dict(getattr(runtime_config, "tuning", {}) or {})
+    camera_tuning = dict(tuning.get("perception_camera_budget", {}) or {})
+    policy_name = str(camera_tuning.get("policy") or "aggressive_budget").strip().lower()
+    is_live = str(getattr(runtime_config, "backend", "stub")).lower() == "carla"
+    device = str(getattr(runtime_config, "perception_device", "cpu")).lower()
+
+    if is_live and policy_name == "aggressive_budget":
+        if device == "cpu":
+            policy = _PerceptionCameraBudgetPolicy(
+                policy="aggressive_budget",
+                enable_batch_inference=True,
+                front_run_every_n_ticks=1,
+                side_run_every_n_ticks=4,
+                rear_run_every_n_ticks=10,
+                front_max_input_long_edge_px=640,
+                surround_max_input_long_edge_px=384,
+                promotion_window_ticks=10,
+                side_promotion_distance_m=15.0,
+                rear_promotion_distance_m=20.0,
+                skip_stale_frames=True,
+            )
+        else:
+            policy = _PerceptionCameraBudgetPolicy(
+                policy="aggressive_budget",
+                enable_batch_inference=True,
+                front_run_every_n_ticks=1,
+                side_run_every_n_ticks=4,
+                rear_run_every_n_ticks=10,
+                front_max_input_long_edge_px=960,
+                surround_max_input_long_edge_px=512,
+                promotion_window_ticks=10,
+                side_promotion_distance_m=15.0,
+                rear_promotion_distance_m=20.0,
+                skip_stale_frames=True,
+            )
+    elif is_live and policy_name == "balanced":
+        policy = _PerceptionCameraBudgetPolicy(
+            policy="balanced",
+            enable_batch_inference=True,
+            front_run_every_n_ticks=1,
+            side_run_every_n_ticks=2,
+            rear_run_every_n_ticks=4,
+            front_max_input_long_edge_px=960 if device != "cpu" else 640,
+            surround_max_input_long_edge_px=640 if device != "cpu" else 448,
+            promotion_window_ticks=10,
+            side_promotion_distance_m=18.0,
+            rear_promotion_distance_m=24.0,
+            skip_stale_frames=True,
+        )
+    elif is_live and policy_name == "coverage_first":
+        policy = _PerceptionCameraBudgetPolicy(
+            policy="coverage_first",
+            enable_batch_inference=True,
+            front_run_every_n_ticks=1,
+            side_run_every_n_ticks=1,
+            rear_run_every_n_ticks=2,
+            front_max_input_long_edge_px=960 if device != "cpu" else 640,
+            surround_max_input_long_edge_px=640 if device != "cpu" else 448,
+            promotion_window_ticks=10,
+            side_promotion_distance_m=20.0,
+            rear_promotion_distance_m=24.0,
+            skip_stale_frames=True,
+        )
+    else:
+        policy = _PerceptionCameraBudgetPolicy(
+            policy=policy_name,
+            enable_batch_inference=False,
+            front_run_every_n_ticks=1,
+            side_run_every_n_ticks=1,
+            rear_run_every_n_ticks=1,
+            front_max_input_long_edge_px=None,
+            surround_max_input_long_edge_px=None,
+            promotion_window_ticks=10,
+            side_promotion_distance_m=15.0,
+            rear_promotion_distance_m=20.0,
+            skip_stale_frames=False,
+        )
+
+    if "enable_batch_inference" in camera_tuning:
+        policy.enable_batch_inference = bool(camera_tuning["enable_batch_inference"])
+    if "front_run_every_n_ticks" in camera_tuning:
+        policy.front_run_every_n_ticks = max(int(camera_tuning["front_run_every_n_ticks"]), 1)
+    if "side_run_every_n_ticks" in camera_tuning:
+        policy.side_run_every_n_ticks = max(int(camera_tuning["side_run_every_n_ticks"]), 1)
+    if "rear_run_every_n_ticks" in camera_tuning:
+        policy.rear_run_every_n_ticks = max(int(camera_tuning["rear_run_every_n_ticks"]), 1)
+    if "front_max_input_long_edge_px" in camera_tuning:
+        value = camera_tuning["front_max_input_long_edge_px"]
+        policy.front_max_input_long_edge_px = None if value in {None, 0, "0"} else int(value)
+    if "surround_max_input_long_edge_px" in camera_tuning:
+        value = camera_tuning["surround_max_input_long_edge_px"]
+        policy.surround_max_input_long_edge_px = None if value in {None, 0, "0"} else int(value)
+    if "promotion_window_ticks" in camera_tuning:
+        policy.promotion_window_ticks = max(int(camera_tuning["promotion_window_ticks"]), 1)
+    if "side_promotion_distance_m" in camera_tuning:
+        policy.side_promotion_distance_m = float(camera_tuning["side_promotion_distance_m"])
+    if "rear_promotion_distance_m" in camera_tuning:
+        policy.rear_promotion_distance_m = float(camera_tuning["rear_promotion_distance_m"])
+    if "skip_stale_frames" in camera_tuning:
+        policy.skip_stale_frames = bool(camera_tuning["skip_stale_frames"])
+
+    return policy
+
+
+def _world_to_ego_xy(world_xyz: np.ndarray, ego_xyz: np.ndarray, ego_yaw_rad: float) -> np.ndarray:
+    delta_xy = np.asarray(world_xyz, dtype=np.float32)[:2] - np.asarray(ego_xyz, dtype=np.float32)[:2]
+    cos_yaw = float(np.cos(ego_yaw_rad))
+    sin_yaw = float(np.sin(ego_yaw_rad))
+    return np.array(
+        [
+            cos_yaw * delta_xy[0] + sin_yaw * delta_xy[1],
+            -sin_yaw * delta_xy[0] + cos_yaw * delta_xy[1],
+        ],
+        dtype=np.float32,
+    )
+
+
+def _rotate_world_velocity_to_ego(velocity_xyz: np.ndarray, ego_yaw_rad: float) -> np.ndarray:
+    velocity_xy = np.asarray(velocity_xyz, dtype=np.float32)[:2]
+    cos_yaw = float(np.cos(ego_yaw_rad))
+    sin_yaw = float(np.sin(ego_yaw_rad))
+    return np.array(
+        [
+            cos_yaw * velocity_xy[0] + sin_yaw * velocity_xy[1],
+            -sin_yaw * velocity_xy[0] + cos_yaw * velocity_xy[1],
+        ],
+        dtype=np.float32,
+    )
 
 
 def _get_segformer_class():
@@ -386,6 +542,7 @@ class PerceptionStack(_CameraSceneContextMixin):
         model_variant: str,
         enable_learned_perception: bool = True,
         aux_policy: _PerceptionAuxPolicy | None = None,
+        camera_budget_policy: _PerceptionCameraBudgetPolicy | None = None,
     ) -> None:
         self.detector = YoloObjectDetector(model_variant=model_variant, device=device)
         self.tracker = KalmanSortTracker()
@@ -394,6 +551,7 @@ class PerceptionStack(_CameraSceneContextMixin):
         self.learned_drivable_extractor = None
         self.learned_lane_extractor = None
         self.aux_policy = aux_policy or _PerceptionAuxPolicy()
+        self.camera_budget_policy = camera_budget_policy or _PerceptionCameraBudgetPolicy()
         if enable_learned_perception:
             segformer_cls = _get_segformer_class()
             if segformer_cls is not None and self.aux_policy.enable_segformer:
@@ -411,6 +569,11 @@ class PerceptionStack(_CameraSceneContextMixin):
                 )
         self.logger = get_logger(__name__, perception_mode="camera_v1")
         self._camera_order = ("front_camera", "left_camera", "right_camera", "rear_camera")
+        self._camera_runtime_state = {
+            sensor_id: _CameraRuntimeState()
+            for sensor_id in self._camera_order
+        }
+        self._last_tracked_detections: list[TrackedDetection2D] = []
 
     def run(
         self, bundle: SensorFrameBundle
@@ -475,7 +638,8 @@ class PerceptionStack(_CameraSceneContextMixin):
         bundle: SensorFrameBundle,
     ) -> tuple[list[ObjectDetection], list[TrafficLightDetection], str, list[str], dict[str, list[dict[str, Any]]]]:
         detections_2d, detector_modes, active_camera_sensors, detections_by_sensor = self._camera_detections(bundle)
-        tracked_detections = self.tracker.update(detections_2d)
+        tracked_detections = self.tracker.update(detections_2d) if detections_2d else self.tracker.predict_only()
+        self._last_tracked_detections = list(tracked_detections)
         object_detections, traffic_lights = self._convert_tracked(tracked_detections)
         return (
             object_detections,
@@ -491,33 +655,233 @@ class PerceptionStack(_CameraSceneContextMixin):
     ) -> tuple[list[FrameDetection2D], dict[str, str], list[str], dict[str, list[FrameDetection2D]]]:
         detections_by_camera: list[FrameDetection2D] = []
         detector_modes: dict[str, str] = {}
-        active_camera_sensors: list[str] = []
-        detections_by_sensor: dict[str, list[FrameDetection2D]] = {}
-        for sensor_id in self._camera_order:
-            camera = getattr(bundle, sensor_id)
-            if camera.status.value == "OFFLINE":
-                continue
-            active_camera_sensors.append(sensor_id)
-            bootstrap_annotations = bootstrap_annotations_from_metadata(
-                bundle.metadata,
-                sensor_id=sensor_id,
-            )
-            detections, detector_mode = self.detector.detect(
-                camera.frame,
-                bootstrap_annotations,
-                sensor_id=sensor_id,
-                ego_world_xyz=np.asarray(bundle.gnss.world_xyz, dtype=np.float32),
-                ego_yaw_rad=float(bundle.metadata.get("ego_yaw_rad", 0.0)),
-            )
-            detector_modes[sensor_id] = detector_mode
-            detections_by_sensor[sensor_id] = list(detections)
-            detections_by_camera.extend(detections)
+        active_camera_sensors = self._active_camera_sensors(bundle)
+        detections_by_sensor: dict[str, list[FrameDetection2D]] = {
+            sensor_id: list(self._camera_runtime_state[sensor_id].last_raw_detections)
+            for sensor_id in active_camera_sensors
+        }
+        requests, scheduled_sensors, skipped_sensors, promoted_sensors = self._select_cameras_for_inference(
+            bundle,
+            active_camera_sensors,
+        )
+
+        if requests:
+            if self.camera_budget_policy.enable_batch_inference:
+                batched_detections_by_sensor, batched_detector_modes = self.detector.detect_batch(requests)
+            else:
+                batched_detections_by_sensor = {}
+                batched_detector_modes = {}
+                total_ms = 0.0
+                per_sensor_ms: dict[str, float] = {}
+                for request in requests:
+                    detections, detector_mode = self.detector.detect(
+                        request.frame,
+                        request.bootstrap_annotations,
+                        sensor_id=request.sensor_id,
+                        ego_world_xyz=request.ego_world_xyz,
+                        ego_yaw_rad=request.ego_yaw_rad,
+                    )
+                    batched_detections_by_sensor[request.sensor_id] = detections
+                    batched_detector_modes[request.sensor_id] = detector_mode
+                    sensor_ms = float(self.detector.last_inference_ms_by_sensor.get(request.sensor_id, self.detector.last_inference_ms_total))
+                    total_ms += sensor_ms
+                    per_sensor_ms[request.sensor_id] = sensor_ms
+                self.detector.last_inference_ms_total = total_ms
+                self.detector.last_inference_ms_by_sensor = per_sensor_ms
+
+            for request in requests:
+                sensor_id = request.sensor_id
+                camera = getattr(bundle, sensor_id)
+                detections = self._filter_camera_detections(
+                    sensor_id,
+                    batched_detections_by_sensor.get(sensor_id, []),
+                )
+                detector_mode = batched_detector_modes.get(sensor_id, "bootstrap")
+                state = self._camera_runtime_state[sensor_id]
+                state.last_inference_tick = int(bundle.tick_id)
+                state.last_inferred_frame_id = None if camera.frame_id is None else int(camera.frame_id)
+                state.last_detector_mode = detector_mode
+                state.last_raw_detections = list(detections)
+                detector_modes[sensor_id] = detector_mode
+                detections_by_sensor[sensor_id] = list(detections)
+                detections_by_camera.extend(detections)
+
+        for sensor_id in active_camera_sensors:
+            state = self._camera_runtime_state[sensor_id]
+            detector_modes.setdefault(sensor_id, state.last_detector_mode)
+            detections_by_sensor.setdefault(sensor_id, list(state.last_raw_detections))
+
+        bundle.metadata["perception_inference_ms_total"] = float(self.detector.last_inference_ms_total if requests else 0.0)
+        bundle.metadata["perception_inference_ms_by_sensor"] = {
+            sensor_id: float(value)
+            for sensor_id, value in (self.detector.last_inference_ms_by_sensor if requests else {}).items()
+        }
+        bundle.metadata["perception_cameras_scheduled"] = list(scheduled_sensors)
+        bundle.metadata["perception_cameras_skipped"] = list(skipped_sensors)
+        bundle.metadata["perception_cameras_promoted"] = list(promoted_sensors)
         return (
             self._merge_camera_detections(detections_by_camera),
             detector_modes,
             active_camera_sensors,
             detections_by_sensor,
         )
+
+    def _active_camera_sensors(self, bundle: SensorFrameBundle) -> list[str]:
+        return [
+            sensor_id
+            for sensor_id in self._camera_order
+            if getattr(bundle, sensor_id).status.value != "OFFLINE"
+        ]
+
+    def _select_cameras_for_inference(
+        self,
+        bundle: SensorFrameBundle,
+        active_camera_sensors: list[str],
+    ) -> tuple[list[CameraInferenceRequest], list[str], list[str], list[str]]:
+        self._update_camera_promotions(bundle)
+        requests: list[CameraInferenceRequest] = []
+        scheduled_sensors: list[str] = []
+        skipped_sensors: list[str] = []
+        promoted_sensors = [
+            sensor_id
+            for sensor_id in active_camera_sensors
+            if self._camera_runtime_state[sensor_id].promotion_until_tick >= int(bundle.tick_id)
+        ]
+        for sensor_id in active_camera_sensors:
+            camera = getattr(bundle, sensor_id)
+            state = self._camera_runtime_state[sensor_id]
+            if self.camera_budget_policy.skip_stale_frames:
+                if camera.status.value == "DEGRADED" and sensor_id != "front_camera":
+                    skipped_sensors.append(sensor_id)
+                    continue
+                if camera.frame_id is not None and state.last_inferred_frame_id == int(camera.frame_id):
+                    skipped_sensors.append(sensor_id)
+                    continue
+            cadence = self._camera_cadence(sensor_id, promoted=sensor_id in promoted_sensors)
+            if (
+                state.last_inference_tick >= 0
+                and int(bundle.tick_id) > state.last_inference_tick
+                and (int(bundle.tick_id) - state.last_inference_tick) < cadence
+            ):
+                skipped_sensors.append(sensor_id)
+                continue
+            requests.append(self._build_inference_request(bundle, sensor_id))
+            scheduled_sensors.append(sensor_id)
+        return requests, scheduled_sensors, skipped_sensors, promoted_sensors
+
+    def _update_camera_promotions(self, bundle: SensorFrameBundle) -> None:
+        current_tick = int(bundle.tick_id)
+        ego_xyz = np.asarray(bundle.gnss.world_xyz, dtype=np.float32)
+        ego_yaw = float(bundle.metadata.get("ego_yaw_rad", 0.0))
+        ego_yaw_rate = float(bundle.imu.gyro_xyz[2])
+        if abs(ego_yaw_rate) > 0.08:
+            self._promote_camera("left_camera", current_tick)
+            self._promote_camera("right_camera", current_tick)
+        front_status = bundle.front_camera.status.value
+        if front_status in {"DEGRADED", "OFFLINE"}:
+            self._promote_camera("left_camera", current_tick)
+            self._promote_camera("right_camera", current_tick)
+        for detection in self._last_tracked_detections:
+            if detection.track_state != TrackState.CONFIRMED or detection.world_xyz is None:
+                continue
+            relative_xy = _world_to_ego_xy(detection.world_xyz, ego_xyz, ego_yaw)
+            distance_m = float(np.linalg.norm(relative_xy))
+            source_sensor_id = str(detection.source_sensor_id)
+            if (
+                source_sensor_id == "left_camera"
+                and relative_xy[1] <= 0.0
+                and distance_m <= self.camera_budget_policy.side_promotion_distance_m
+            ):
+                self._promote_camera("left_camera", current_tick)
+            if (
+                source_sensor_id == "right_camera"
+                and relative_xy[1] >= 0.0
+                and distance_m <= self.camera_budget_policy.side_promotion_distance_m
+            ):
+                self._promote_camera("right_camera", current_tick)
+            if (
+                source_sensor_id == "rear_camera"
+                and distance_m <= self.camera_budget_policy.rear_promotion_distance_m
+                and self._is_rear_closing(detection, ego_yaw, relative_xy[0])
+            ):
+                self._promote_camera("rear_camera", current_tick)
+
+    def _promote_camera(self, sensor_id: str, current_tick: int) -> None:
+        state = self._camera_runtime_state[sensor_id]
+        state.promotion_until_tick = max(
+            state.promotion_until_tick,
+            current_tick + self.camera_budget_policy.promotion_window_ticks,
+        )
+
+    def _is_rear_closing(self, detection: TrackedDetection2D, ego_yaw_rad: float, relative_x: float) -> bool:
+        velocity_xyz = (
+            np.asarray(detection.velocity_xyz, dtype=np.float32)
+            if detection.velocity_xyz is not None
+            else np.zeros(3, dtype=np.float32)
+        )
+        ego_velocity_xy = _rotate_world_velocity_to_ego(velocity_xyz, ego_yaw_rad)
+        return relative_x < 0.0 and ego_velocity_xy[0] > 0.0
+
+    def _camera_cadence(self, sensor_id: str, *, promoted: bool) -> int:
+        if sensor_id == "front_camera":
+            return 1 if promoted else self.camera_budget_policy.front_run_every_n_ticks
+        if sensor_id == "rear_camera":
+            return 2 if promoted else self.camera_budget_policy.rear_run_every_n_ticks
+        return 1 if promoted else self.camera_budget_policy.side_run_every_n_ticks
+
+    def _build_inference_request(self, bundle: SensorFrameBundle, sensor_id: str) -> CameraInferenceRequest:
+        camera = getattr(bundle, sensor_id)
+        ego_yaw = float(bundle.metadata.get("ego_yaw_rad", 0.0))
+        bootstrap_annotations = bootstrap_annotations_from_metadata(
+            bundle.metadata,
+            sensor_id=sensor_id,
+        )
+        if sensor_id == "front_camera":
+            allowed_classes = (
+                ObjectClass.VEHICLE,
+                ObjectClass.CYCLIST,
+                ObjectClass.PEDESTRIAN,
+                ObjectClass.TRAFFIC_LIGHT,
+            )
+            min_confidence = 0.0
+            min_bbox_area_px = 0.0
+            max_input_long_edge_px = self.camera_budget_policy.front_max_input_long_edge_px
+        else:
+            allowed_classes = (
+                ObjectClass.VEHICLE,
+                ObjectClass.CYCLIST,
+                ObjectClass.PEDESTRIAN,
+            )
+            min_confidence = 0.45
+            min_bbox_area_px = 300.0
+            max_input_long_edge_px = self.camera_budget_policy.surround_max_input_long_edge_px
+        return CameraInferenceRequest(
+            frame=camera.frame,
+            bootstrap_annotations=bootstrap_annotations,
+            sensor_id=sensor_id,
+            ego_world_xyz=np.asarray(bundle.gnss.world_xyz, dtype=np.float32),
+            ego_yaw_rad=ego_yaw,
+            max_input_long_edge_px=max_input_long_edge_px,
+            allowed_classes=allowed_classes,
+            min_confidence=min_confidence,
+            min_bbox_area_px=min_bbox_area_px,
+        )
+
+    def _filter_camera_detections(
+        self,
+        sensor_id: str,
+        detections: list[FrameDetection2D],
+    ) -> list[FrameDetection2D]:
+        filtered: list[FrameDetection2D] = []
+        for detection in detections:
+            if sensor_id != "front_camera" and detection.object_class == ObjectClass.TRAFFIC_LIGHT:
+                continue
+            bbox_xyxy = np.asarray(detection.bbox_xyxy, dtype=np.float32)
+            bbox_area = max(0.0, float(bbox_xyxy[2] - bbox_xyxy[0])) * max(0.0, float(bbox_xyxy[3] - bbox_xyxy[1]))
+            if sensor_id != "front_camera" and (float(detection.confidence) < 0.45 or bbox_area < 300.0):
+                continue
+            filtered.append(detection)
+        return filtered
 
     def _merge_camera_detections(
         self,
@@ -731,12 +1095,14 @@ class FusedPerceptionStack(_CameraSceneContextMixin):
         model_variant: str,
         enable_learned_perception: bool = True,
         aux_policy: _PerceptionAuxPolicy | None = None,
+        camera_budget_policy: _PerceptionCameraBudgetPolicy | None = None,
     ) -> None:
         self.camera_stack = PerceptionStack(
             device=device,
             model_variant=model_variant,
             enable_learned_perception=enable_learned_perception,
             aux_policy=aux_policy,
+            camera_budget_policy=camera_budget_policy,
         )
         self.lidar_stack = LidarPerceptionStack()
         self.lane_extractor = self.camera_stack.lane_extractor
@@ -860,12 +1226,14 @@ class FusedPerceptionStack(_CameraSceneContextMixin):
 def build_perception_module(runtime_config):
     enable_learned = getattr(runtime_config, "enable_learned_perception", True)
     aux_policy = _resolve_perception_aux_policy(runtime_config)
+    camera_budget_policy = _resolve_perception_camera_budget_policy(runtime_config)
     if runtime_config.perception_mode == "camera_v1":
         return PerceptionStack(
             device=runtime_config.perception_device,
             model_variant=runtime_config.perception_model_variant,
             enable_learned_perception=enable_learned,
             aux_policy=aux_policy,
+            camera_budget_policy=camera_budget_policy,
         )
     if runtime_config.perception_mode == "lidar_v1":
         return LidarPerceptionStack()
@@ -875,5 +1243,6 @@ def build_perception_module(runtime_config):
             model_variant=runtime_config.perception_model_variant,
             enable_learned_perception=enable_learned,
             aux_policy=aux_policy,
+            camera_budget_policy=camera_budget_policy,
         )
     return StubPerceptionModule()

@@ -7,7 +7,17 @@ from autonomy_demo.interfaces.enums import ObjectClass, SensorStatus, TrackState
 from autonomy_demo.interfaces.types import CameraFrame, GnssReading, ImuReading, LidarFrame, ObjectDetection, RadarFrame, SensorFrameBundle
 from autonomy_demo.mapping.module import StubMappingModule
 from autonomy_demo.perception.fusion import fuse_detections
-from autonomy_demo.perception.module import FusedPerceptionStack, LidarPerceptionStack, PerceptionStack, build_perception_module
+from autonomy_demo.perception.internal_types import FrameDetection2D
+from autonomy_demo.perception.module import (
+    FusedPerceptionStack,
+    LidarPerceptionStack,
+    PerceptionStack,
+    _PerceptionCameraBudgetPolicy,
+    _resolve_perception_camera_budget_policy,
+    build_perception_module,
+)
+from autonomy_demo.perception.object_detection import CameraInferenceRequest, YoloObjectDetector, bootstrap_annotations_from_metadata
+from autonomy_demo.perception.tracking import KalmanSortTracker
 
 
 def _bundle() -> SensorFrameBundle:
@@ -215,6 +225,25 @@ class _FakeAliasModel:
         return [_FakeAliasResult()]
 
 
+class _FakeBatchResult:
+    def __init__(self, bbox_xyxy: list[float], confidence: float, label_map: dict[int, str], cls_idx: int) -> None:
+        self.boxes = [_FakeBox(bbox_xyxy, confidence, cls_idx)]
+        self.names = label_map
+
+
+class _FakeBatchModel:
+    def __init__(self) -> None:
+        self.last_source_shapes: list[tuple[int, int]] = []
+
+    def predict(self, source, device, verbose):  # noqa: ANN001
+        sources = source if isinstance(source, list) else [source]
+        self.last_source_shapes = [tuple(frame.shape[:2]) for frame in sources]
+        return [
+            _FakeBatchResult([16.0, 12.0, 32.0, 28.0], 0.9, {0: "car"}, 0),
+            _FakeBatchResult([8.0, 4.0, 24.0, 20.0], 0.95, {0: "traffic_light_red"}, 0),
+        ]
+
+
 def test_perception_stack_prefers_camera_mode_when_yolo_is_available() -> None:
     module = PerceptionStack(device="cpu", model_variant="auto")
     module.detector._model = _FakeModel()
@@ -244,6 +273,71 @@ def test_perception_stack_supports_custom_model_label_aliases() -> None:
     assert traffic_lights[0].state.value == "RED"
 
 
+def test_camera_budget_policy_defaults_to_aggressive_live_budget() -> None:
+    runtime = type(
+        "Runtime",
+        (),
+        {
+            "backend": "carla",
+            "perception_device": "cpu",
+            "tuning": {},
+        },
+    )()
+
+    policy = _resolve_perception_camera_budget_policy(runtime)
+
+    assert policy.policy == "aggressive_budget"
+    assert policy.enable_batch_inference is True
+    assert policy.front_run_every_n_ticks == 1
+    assert policy.side_run_every_n_ticks == 4
+    assert policy.rear_run_every_n_ticks == 10
+    assert policy.front_max_input_long_edge_px == 640
+    assert policy.surround_max_input_long_edge_px == 384
+    assert policy.skip_stale_frames is True
+
+
+def test_yolo_detector_batch_resizes_and_filters_surround_traffic_lights() -> None:
+    detector = YoloObjectDetector(model_variant="auto", device="cpu")
+    detector._model = _FakeBatchModel()
+    front_frame = np.zeros((256, 512, 3), dtype=np.float32)
+    side_frame = np.zeros((240, 320, 3), dtype=np.float32)
+
+    detections_by_sensor, detector_modes = detector.detect_batch(
+        [
+            CameraInferenceRequest(
+                frame=front_frame,
+                bootstrap_annotations=[],
+                sensor_id="front_camera",
+                max_input_long_edge_px=128,
+                allowed_classes=(
+                    ObjectClass.VEHICLE,
+                    ObjectClass.CYCLIST,
+                    ObjectClass.PEDESTRIAN,
+                    ObjectClass.TRAFFIC_LIGHT,
+                ),
+            ),
+            CameraInferenceRequest(
+                frame=side_frame,
+                bootstrap_annotations=[],
+                sensor_id="left_camera",
+                max_input_long_edge_px=64,
+                allowed_classes=(
+                    ObjectClass.VEHICLE,
+                    ObjectClass.CYCLIST,
+                    ObjectClass.PEDESTRIAN,
+                ),
+            ),
+        ]
+    )
+
+    assert detector_modes == {"front_camera": "camera", "left_camera": "camera"}
+    assert detector._model.last_source_shapes == [(64, 128), (48, 64)]
+    assert len(detections_by_sensor["front_camera"]) == 1
+    assert detections_by_sensor["front_camera"][0].object_class == ObjectClass.VEHICLE
+    assert detections_by_sensor["front_camera"][0].bbox_xyxy[2] > 100.0
+    assert detections_by_sensor["left_camera"] == []
+
+
 def test_tracker_confirms_persistent_tracks() -> None:
     module = PerceptionStack(device="cpu", model_variant="bootstrap")
     first_bundle = _bundle()
@@ -252,6 +346,100 @@ def test_tracker_confirms_persistent_tracks() -> None:
     second_detections, _, _, _, _ = module.run(second_bundle)
     assert first_detections[0].track_state == TrackState.TENTATIVE
     assert second_detections[0].track_state == TrackState.CONFIRMED
+
+
+def test_tracker_predict_only_preserves_confirmed_tracks() -> None:
+    tracker = KalmanSortTracker(confirm_hits=2)
+    detection = FrameDetection2D(
+        bbox_xyxy=np.array([10.0, 10.0, 30.0, 30.0], dtype=np.float32),
+        object_class=ObjectClass.VEHICLE,
+        confidence=0.9,
+        source_sensor_id="front_camera",
+        source_sensor_ids=["front_camera"],
+    )
+
+    tracker.update([detection])
+    tracker.update([detection])
+    predicted = tracker.predict_only()
+
+    assert len(predicted) == 1
+    assert predicted[0].track_state == TrackState.CONFIRMED
+
+
+def test_perception_stack_skips_stale_surround_cameras_and_records_metadata() -> None:
+    policy = _PerceptionCameraBudgetPolicy(
+        policy="aggressive_budget",
+        enable_batch_inference=False,
+        front_run_every_n_ticks=1,
+        side_run_every_n_ticks=4,
+        rear_run_every_n_ticks=10,
+        front_max_input_long_edge_px=640,
+        surround_max_input_long_edge_px=384,
+        promotion_window_ticks=10,
+        side_promotion_distance_m=15.0,
+        rear_promotion_distance_m=20.0,
+        skip_stale_frames=True,
+    )
+    module = PerceptionStack(
+        device="cpu",
+        model_variant="bootstrap",
+        camera_budget_policy=policy,
+    )
+    first_bundle = _bundle()
+    first_bundle.tick_id = 0
+    first_bundle.front_camera.frame_id = 0
+    first_bundle.left_camera.frame_id = 0
+    first_bundle.right_camera.frame_id = 0
+    first_bundle.rear_camera.frame_id = 0
+    module.run(first_bundle)
+
+    second_bundle = _bundle()
+    second_bundle.tick_id = 1
+    second_bundle.front_camera.frame_id = 1
+    second_bundle.left_camera.frame_id = 0
+    second_bundle.right_camera.frame_id = 0
+    second_bundle.rear_camera.frame_id = 0
+    second_bundle.left_camera.status = SensorStatus.DEGRADED
+    second_bundle.right_camera.status = SensorStatus.DEGRADED
+    second_bundle.rear_camera.status = SensorStatus.DEGRADED
+    module.run(second_bundle)
+
+    assert second_bundle.metadata["perception_cameras_scheduled"] == ["front_camera"]
+    assert set(second_bundle.metadata["perception_cameras_skipped"]) == {"left_camera", "right_camera", "rear_camera"}
+    assert second_bundle.metadata["perception_inference_ms_total"] == pytest.approx(0.0)
+
+
+def test_perception_stack_promotes_side_cameras_on_yaw_rate() -> None:
+    policy = _PerceptionCameraBudgetPolicy(
+        policy="aggressive_budget",
+        enable_batch_inference=False,
+        front_run_every_n_ticks=1,
+        side_run_every_n_ticks=4,
+        rear_run_every_n_ticks=10,
+        front_max_input_long_edge_px=640,
+        surround_max_input_long_edge_px=384,
+        promotion_window_ticks=10,
+        side_promotion_distance_m=15.0,
+        rear_promotion_distance_m=20.0,
+        skip_stale_frames=False,
+    )
+    module = PerceptionStack(
+        device="cpu",
+        model_variant="bootstrap",
+        camera_budget_policy=policy,
+    )
+    first_bundle = _bundle()
+    first_bundle.tick_id = 0
+    module.run(first_bundle)
+
+    second_bundle = _bundle()
+    second_bundle.tick_id = 1
+    second_bundle.imu.gyro_xyz[2] = 0.2
+    module.run(second_bundle)
+
+    assert set(second_bundle.metadata["perception_cameras_promoted"]) >= {"left_camera", "right_camera"}
+    assert set(second_bundle.metadata["perception_cameras_scheduled"]) >= {"front_camera", "left_camera", "right_camera"}
+
 
 
 def test_perception_stack_merges_duplicate_tracks_across_cameras() -> None:
@@ -268,10 +456,10 @@ def test_perception_stack_merges_duplicate_tracks_across_cameras() -> None:
     detections, _, _, traffic_lights, _ = module.run(bundle)
 
     assert len(detections) == 1
-    assert len(traffic_lights) == 1
+    assert traffic_lights == []
     assert bundle.metadata["perception_camera_detection_counts"] == {
         "front_camera": 0,
-        "left_camera": 2,
+        "left_camera": 1,
         "right_camera": 0,
         "rear_camera": 0,
     }

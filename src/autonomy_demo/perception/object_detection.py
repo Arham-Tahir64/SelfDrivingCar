@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from time import perf_counter
+from typing import Any, Sequence
 
 import numpy as np
 
@@ -147,6 +148,49 @@ class BootstrapAnnotation:
     traffic_light_state: TrafficLightState | None = None
 
 
+@dataclass(slots=True)
+class CameraInferenceRequest:
+    frame: np.ndarray
+    bootstrap_annotations: list[BootstrapAnnotation]
+    sensor_id: str = "front_camera"
+    ego_world_xyz: np.ndarray | None = None
+    ego_yaw_rad: float = 0.0
+    max_input_long_edge_px: int | None = None
+    allowed_classes: tuple[ObjectClass, ...] | None = None
+    min_confidence: float = 0.0
+    min_bbox_area_px: float = 0.0
+
+
+def _resize_image(frame: np.ndarray, max_input_long_edge_px: int | None) -> tuple[np.ndarray, np.ndarray]:
+    if max_input_long_edge_px is None or max_input_long_edge_px <= 0:
+        return frame, np.array([1.0, 1.0, 1.0, 1.0], dtype=np.float32)
+    height, width = frame.shape[:2]
+    current_long_edge = max(height, width)
+    if current_long_edge <= max_input_long_edge_px:
+        return frame, np.array([1.0, 1.0, 1.0, 1.0], dtype=np.float32)
+    scale = max_input_long_edge_px / float(current_long_edge)
+    resized_width = max(1, int(round(width * scale)))
+    resized_height = max(1, int(round(height * scale)))
+    try:
+        import cv2  # type: ignore
+
+        resized = cv2.resize(frame, (resized_width, resized_height), interpolation=cv2.INTER_AREA)
+    except ImportError:  # pragma: no cover
+        y_indices = np.linspace(0, height - 1, resized_height).astype(np.int32)
+        x_indices = np.linspace(0, width - 1, resized_width).astype(np.int32)
+        resized = frame[np.ix_(y_indices, x_indices)]
+    scale_back = np.array(
+        [
+            width / float(resized_width),
+            height / float(resized_height),
+            width / float(resized_width),
+            height / float(resized_height),
+        ],
+        dtype=np.float32,
+    )
+    return resized, scale_back
+
+
 class YoloObjectDetector:
     """TODO(PRD 3.2.3): swap this bootstrap-first adapter for the user's trained YOLO model config."""
 
@@ -155,6 +199,8 @@ class YoloObjectDetector:
         self.device = device
         self._model: Any | None = None
         self._load_error: str | None = None
+        self.last_inference_ms_total: float = 0.0
+        self.last_inference_ms_by_sensor: dict[str, float] = {}
 
     def detect(
         self,
@@ -165,36 +211,115 @@ class YoloObjectDetector:
         ego_world_xyz: np.ndarray | None = None,
         ego_yaw_rad: float = 0.0,
     ) -> tuple[list[FrameDetection2D], str]:
+        detections_by_sensor, detector_modes = self.detect_batch(
+            [
+                CameraInferenceRequest(
+                    frame=frame,
+                    bootstrap_annotations=bootstrap_annotations,
+                    sensor_id=sensor_id,
+                    ego_world_xyz=ego_world_xyz,
+                    ego_yaw_rad=ego_yaw_rad,
+                )
+            ]
+        )
+        return detections_by_sensor.get(sensor_id, []), detector_modes.get(sensor_id, "bootstrap")
+
+    def detect_batch(
+        self,
+        requests: Sequence[CameraInferenceRequest],
+    ) -> tuple[dict[str, list[FrameDetection2D]], dict[str, str]]:
+        detections_by_sensor: dict[str, list[FrameDetection2D]] = {}
+        detector_modes: dict[str, str] = {}
+        self.last_inference_ms_total = 0.0
+        self.last_inference_ms_by_sensor = {}
+        if not requests:
+            return detections_by_sensor, detector_modes
         if self._uses_explicit_bootstrap():
-            return self._from_bootstrap(bootstrap_annotations, sensor_id=sensor_id), "bootstrap"
+            return self._bootstrap_batch(requests)
         if self._model is None and self._load_error is None:
             try:
                 self._model = self._load_model()
             except Exception as exc:  # pragma: no cover - depends on optional runtime deps
                 self._load_error = str(exc)
-                return self._from_bootstrap(bootstrap_annotations, sensor_id=sensor_id), "bootstrap"
+                return self._bootstrap_batch(requests)
         if self._model is None:
-            return self._from_bootstrap(bootstrap_annotations, sensor_id=sensor_id), "bootstrap"
+            return self._bootstrap_batch(requests)
+
+        prepared_requests: list[tuple[CameraInferenceRequest, np.ndarray, np.ndarray]] = []
+        sources: list[np.ndarray] = []
+        for request in requests:
+            resized_frame, scale_back = _resize_image(request.frame, request.max_input_long_edge_px)
+            prepared_requests.append((request, resized_frame, scale_back))
+            sources.append(resized_frame.astype(np.uint8))
+
         try:
+            start = perf_counter()
             results = self._model.predict(
-                source=frame.astype(np.uint8),
+                source=sources if len(sources) > 1 else sources[0],
                 device=self.device,
                 verbose=False,
             )
+            self.last_inference_ms_total = max(0.0, (perf_counter() - start) * 1000.0)
         except (RuntimeError, ValueError, OSError) as exc:  # pragma: no cover - depends on optional runtime deps
             import logging
-            logging.getLogger(__name__).warning("YOLO predict failed on %s: %s", sensor_id, exc)
-            return self._from_bootstrap(bootstrap_annotations, sensor_id=sensor_id), "bootstrap"
-        if not results:
-            return [], "camera"
-        result = results[0]
+
+            logging.getLogger(__name__).warning("YOLO batch predict failed: %s", exc)
+            return self._bootstrap_batch(requests)
+
+        normalized_results = self._normalize_results(results)
+        if len(normalized_results) != len(prepared_requests):
+            return self._bootstrap_batch(requests)
+
+        inference_share = self.last_inference_ms_total / float(max(len(prepared_requests), 1))
+        for (request, resized_frame, scale_back), result in zip(prepared_requests, normalized_results):
+            detections_by_sensor[request.sensor_id] = self._detections_from_result(
+                result,
+                request=request,
+                scale_back=scale_back,
+            )
+            detector_modes[request.sensor_id] = "camera"
+            self.last_inference_ms_by_sensor[request.sensor_id] = inference_share
+        return detections_by_sensor, detector_modes
+
+    def _normalize_results(self, results: Any) -> list[Any]:
+        if results is None:
+            return []
+        if isinstance(results, list):
+            return list(results)
+        if isinstance(results, tuple):
+            return list(results)
+        return [results]
+
+    def _bootstrap_batch(
+        self,
+        requests: Sequence[CameraInferenceRequest],
+    ) -> tuple[dict[str, list[FrameDetection2D]], dict[str, str]]:
+        detections_by_sensor: dict[str, list[FrameDetection2D]] = {}
+        detector_modes: dict[str, str] = {}
+        for request in requests:
+            detections_by_sensor[request.sensor_id] = self._from_bootstrap(
+                request.bootstrap_annotations,
+                sensor_id=request.sensor_id,
+            )
+            detector_modes[request.sensor_id] = "bootstrap"
+            self.last_inference_ms_by_sensor[request.sensor_id] = 0.0
+        self.last_inference_ms_total = 0.0
+        return detections_by_sensor, detector_modes
+
+    def _detections_from_result(
+        self,
+        result: Any,
+        *,
+        request: CameraInferenceRequest,
+        scale_back: np.ndarray,
+    ) -> list[FrameDetection2D]:
         boxes = getattr(result, "boxes", None)
         names = getattr(result, "names", {})
         detections: list[FrameDetection2D] = []
         if boxes is None:
-            return [], "camera"
+            return detections
         ego_xyz = np.asarray(
-            np.zeros(3, dtype=np.float32) if ego_world_xyz is None else ego_world_xyz,
+            np.zeros(3, dtype=np.float32) if request.ego_world_xyz is None else request.ego_world_xyz,
             dtype=np.float32,
         )
         for box in boxes:
@@ -203,24 +328,31 @@ class YoloObjectDetector:
             object_class = _object_class_from_label(label)
             if object_class is None:
                 continue
-            bbox_xyxy = box.xyxy[0].detach().cpu().numpy().astype(np.float32)
+            if request.allowed_classes is not None and object_class not in request.allowed_classes:
+                continue
             confidence = float(box.conf[0].item())
+            if confidence < request.min_confidence:
+                continue
+            bbox_xyxy = box.xyxy[0].detach().cpu().numpy().astype(np.float32) * scale_back
+            bbox_area = max(0.0, float(bbox_xyxy[2] - bbox_xyxy[0])) * max(0.0, float(bbox_xyxy[3] - bbox_xyxy[1]))
+            if bbox_area < request.min_bbox_area_px:
+                continue
             world_bbox, velocity_xyz, world_xyz = _pseudo_world_box(
                 bbox_xyxy,
                 object_class,
-                frame.shape,
-                sensor_id=sensor_id,
+                request.frame.shape,
+                sensor_id=request.sensor_id,
                 ego_world_xyz=ego_xyz,
-                ego_yaw_rad=ego_yaw_rad,
+                ego_yaw_rad=request.ego_yaw_rad,
             )
             detections.append(
                 FrameDetection2D(
                     bbox_xyxy=bbox_xyxy,
                     object_class=object_class,
                     confidence=confidence,
-                    source_sensor_id=sensor_id,
+                    source_sensor_id=request.sensor_id,
                     source_modality="camera",
-                    source_sensor_ids=[sensor_id],
+                    source_sensor_ids=[request.sensor_id],
                     position_estimate_kind="camera_projection",
                     world_bbox_3d=world_bbox,
                     velocity_xyz=velocity_xyz,
@@ -228,7 +360,7 @@ class YoloObjectDetector:
                     traffic_light_state=_traffic_light_state_from_label(label),
                 )
             )
-        return detections, "camera"
+        return detections
 
     def _uses_explicit_bootstrap(self) -> bool:
         return self.model_variant.strip().lower() == "bootstrap"
