@@ -53,6 +53,10 @@ class _ReferencePath:
     centerline_world: np.ndarray
     speed_limit_mps: float
     source_kind: str
+    cumulative_s: np.ndarray
+    segment_lengths: np.ndarray
+    segment_vectors: np.ndarray
+    segment_headings: np.ndarray
     left_boundary_world: np.ndarray | None = None
     right_boundary_world: np.ndarray | None = None
 
@@ -77,6 +81,7 @@ class _TrajectorySamples:
     d_ddot: np.ndarray
     d_jerk: np.ndarray
     relative_progress_m: np.ndarray
+    world_points_xy: np.ndarray
     world_waypoints: list[Waypoint]
     max_curvature: float
 
@@ -95,12 +100,34 @@ class _Polynomial:
         return float(np.polyval(self.coefficients[::-1], t))
 
     def derivative(self, t: float, order: int) -> float:
-        coeffs = self.coefficients.copy()
+        return float(self.derivative_values(np.asarray([t], dtype=np.float64), order)[0])
+
+    def values(self, t_values: np.ndarray) -> np.ndarray:
+        values = np.asarray(t_values, dtype=np.float64)
+        result = np.zeros_like(values, dtype=np.float64)
+        for coefficient in self.coefficients[::-1]:
+            result = (result * values) + float(coefficient)
+        return result
+
+    def derivative_values(self, t_values: np.ndarray, order: int) -> np.ndarray:
+        values = np.asarray(t_values, dtype=np.float64)
+        coeffs = self.coefficients.astype(np.float64, copy=True)
         for _ in range(order):
             coeffs = np.array([index * coeffs[index] for index in range(1, len(coeffs))], dtype=np.float64)
             if len(coeffs) == 0:
-                return 0.0
-        return float(np.polyval(coeffs[::-1], t))
+                return np.zeros_like(values, dtype=np.float64)
+        result = np.zeros_like(values, dtype=np.float64)
+        for coefficient in coeffs[::-1]:
+            result = (result * values) + float(coefficient)
+        return result
+
+
+@dataclass(slots=True)
+class _PlannerRunContext:
+    reference_projection: any
+    closed_lanes: set[str]
+    safety_margins: dict[int, float]
+    dynamic_obstacles_by_step: list[list[tuple[int, np.ndarray, float]]]
 
 
 def _solve_quintic(
@@ -220,6 +247,60 @@ class FrenetMotionPlanner:
         )
         self.last_candidates: list[PlannerCandidate] = []
 
+    def _build_reference_path(
+        self,
+        *,
+        lane_id: str,
+        centerline_world: np.ndarray,
+        speed_limit_mps: float,
+        source_kind: str,
+        left_boundary_world: np.ndarray | None = None,
+        right_boundary_world: np.ndarray | None = None,
+    ) -> _ReferencePath:
+        centerline_world = np.asarray(centerline_world, dtype=np.float32)
+        segment_vectors = np.diff(centerline_world, axis=0)
+        if len(segment_vectors) == 0:
+            segment_vectors = np.zeros((1, 3), dtype=np.float32)
+            segment_lengths = np.ones(1, dtype=np.float32)
+            segment_headings = np.zeros(1, dtype=np.float32)
+            cumulative_s = np.array([0.0, 1.0], dtype=np.float32)
+        else:
+            segment_lengths = np.linalg.norm(segment_vectors[:, :2], axis=1).astype(np.float32)
+            segment_lengths = np.where(segment_lengths > 1e-6, segment_lengths, 1e-6).astype(np.float32)
+            segment_headings = np.arctan2(segment_vectors[:, 1], segment_vectors[:, 0]).astype(np.float32)
+            cumulative_s = np.concatenate(
+                [np.array([0.0], dtype=np.float32), np.cumsum(segment_lengths, dtype=np.float32)]
+            )
+        return _ReferencePath(
+            lane_id=lane_id,
+            centerline_world=centerline_world,
+            speed_limit_mps=float(speed_limit_mps),
+            source_kind=source_kind,
+            cumulative_s=cumulative_s,
+            segment_lengths=segment_lengths,
+            segment_vectors=segment_vectors,
+            segment_headings=segment_headings,
+            left_boundary_world=left_boundary_world,
+            right_boundary_world=right_boundary_world,
+        )
+
+    def _sample_reference_points(
+        self,
+        reference_path: _ReferencePath,
+        s_values: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        clamped_s = np.clip(np.asarray(s_values, dtype=np.float64), 0.0, float(reference_path.cumulative_s[-1]))
+        segment_indices = np.searchsorted(reference_path.cumulative_s[1:], clamped_s, side="right")
+        segment_indices = np.clip(segment_indices, 0, len(reference_path.segment_lengths) - 1)
+        segment_start_s = reference_path.cumulative_s[segment_indices]
+        ratios = ((clamped_s - segment_start_s) / reference_path.segment_lengths[segment_indices]).astype(np.float32)
+        points = (
+            reference_path.centerline_world[segment_indices]
+            + (reference_path.segment_vectors[segment_indices] * ratios[:, None])
+        ).astype(np.float32)
+        headings = reference_path.segment_headings[segment_indices].astype(np.float64)
+        return points, headings
+
     def _effective_terminal_times(self) -> list[float]:
         if self.planning_horizon_s <= 0.0:
             return [0.1]
@@ -251,6 +332,14 @@ class FrenetMotionPlanner:
         if not motion_targets:
             return self._fallback.run(local_map, ego_pose, predictions, behavior_state)
 
+        safety_margins = self._prediction_safety_map(local_map, predictions)
+        run_context = _PlannerRunContext(
+            reference_projection=project_point_to_centerline(reference_path.centerline_world, ego_pose.world_xyz),
+            closed_lanes=set(local_map.closed_lanes),
+            safety_margins=safety_margins,
+            dynamic_obstacles_by_step=self._prepare_dynamic_obstacles(local_map, predictions, safety_margins),
+        )
+
         candidates = [
             self._evaluate_candidate(
                 local_map=local_map,
@@ -259,6 +348,7 @@ class FrenetMotionPlanner:
                 behavior_state=behavior_state,
                 reference_path=reference_path,
                 target=target,
+                run_context=run_context,
             )
             for target in motion_targets
         ]
@@ -276,6 +366,7 @@ class FrenetMotionPlanner:
             predictions=predictions,
             behavior_state=behavior_state,
             reference_path=reference_path,
+            run_context=run_context,
         )
         if stop_candidate is not None:
             self.last_candidates.append(stop_candidate)
@@ -297,7 +388,7 @@ class FrenetMotionPlanner:
         lane = self._reference_lane(local_map, ego_pose)
         if lane is None:
             return None
-        return _ReferencePath(
+        return self._build_reference_path(
             lane_id=lane.lane_id,
             centerline_world=np.asarray(lane.centerline_world, dtype=np.float32),
             left_boundary_world=np.asarray(lane.left_boundary_world, dtype=np.float32),
@@ -319,7 +410,7 @@ class FrenetMotionPlanner:
             if nearest_lane is not None and nearest_lane.speed_limit_mps > 0.0
             else self.cruise_speed_mps
         )
-        return _ReferencePath(
+        return self._build_reference_path(
             lane_id="route_reference",
             centerline_world=centerline_world,
             left_boundary_world=(
@@ -539,8 +630,9 @@ class FrenetMotionPlanner:
         behavior_state: BehaviorState,
         reference_path: _ReferencePath,
         target: _MotionTarget,
+        run_context: _PlannerRunContext,
     ) -> PlannerCandidate:
-        samples = self._sample_candidate(reference_path, ego_pose, target)
+        samples = self._sample_candidate(reference_path, ego_pose, target, run_context.reference_projection)
         trajectory = EgoTrajectory(
             waypoints=samples.world_waypoints,
             cost=0.0,
@@ -568,6 +660,7 @@ class FrenetMotionPlanner:
             reference_path=reference_path,
             target=target,
             samples=samples,
+            run_context=run_context,
         )
         if reject_reason is not None:
             candidate.feasible = False
@@ -577,7 +670,7 @@ class FrenetMotionPlanner:
             candidate.cost_breakdown.total = float(candidate.score)
             return candidate
 
-        clearance = self._dynamic_clearance(local_map, predictions, samples)
+        clearance = self._dynamic_clearance(local_map, samples, run_context)
         desired_lateral_path = (
             np.full_like(samples.d, target.target_d_m)
             if behavior_state in {
@@ -627,8 +720,8 @@ class FrenetMotionPlanner:
         reference_path: _ReferencePath,
         ego_pose: EgoPose,
         target: _MotionTarget,
+        reference_projection,
     ) -> _TrajectorySamples:
-        reference_projection = project_point_to_centerline(reference_path.centerline_world, ego_pose.world_xyz)
         lateral_poly = _solve_quintic(
             x0=float(reference_projection.d),
             x_dot0=0.0,
@@ -658,78 +751,73 @@ class FrenetMotionPlanner:
                 T=target.terminal_time_s,
             )
 
-        s_values: list[float] = []
-        s_dot_values: list[float] = []
-        s_ddot_values: list[float] = []
-        s_jerk_values: list[float] = []
-        d_values: list[float] = []
-        d_dot_values: list[float] = []
-        d_ddot_values: list[float] = []
-        d_jerk_values: list[float] = []
-        headings: list[float] = []
-        waypoints: list[Waypoint] = []
+        time_s = np.arange(1, self.horizon_steps + 1, dtype=np.float64) * float(self.dt_s)
+        eval_time_s = np.minimum(time_s, float(target.terminal_time_s))
 
-        previous_xy: np.ndarray | None = None
-        max_curvature = 0.0
-        for step in range(1, self.horizon_steps + 1):
-            time_s = float(step * self.dt_s)
-            eval_time_s = min(time_s, target.terminal_time_s)
+        s_values = longitudinal_poly.values(eval_time_s)
+        s_dot_values = np.maximum(longitudinal_poly.derivative_values(eval_time_s, 1), 0.0)
+        s_ddot_values = longitudinal_poly.derivative_values(eval_time_s, 2)
+        s_jerk_values = longitudinal_poly.derivative_values(eval_time_s, 3)
 
-            s_value = longitudinal_poly.value(eval_time_s)
-            s_dot = max(longitudinal_poly.derivative(eval_time_s, 1), 0.0)
-            s_ddot = longitudinal_poly.derivative(eval_time_s, 2)
-            s_jerk = longitudinal_poly.derivative(eval_time_s, 3)
-            if time_s > target.terminal_time_s:
-                delta_t = time_s - target.terminal_time_s
-                s_terminal = longitudinal_poly.value(target.terminal_time_s)
-                s_dot_terminal = max(longitudinal_poly.derivative(target.terminal_time_s, 1), 0.0)
-                if target.target_s_m is not None and target.target_speed_mps <= 0.1:
-                    s_value = s_terminal
-                else:
-                    s_value = s_terminal + (s_dot_terminal * delta_t)
-                s_dot = s_dot_terminal
-                s_ddot = 0.0
-                s_jerk = 0.0
+        past_terminal_mask = time_s > float(target.terminal_time_s)
+        if np.any(past_terminal_mask):
+            delta_t = time_s[past_terminal_mask] - float(target.terminal_time_s)
+            s_terminal = float(longitudinal_poly.value(float(target.terminal_time_s)))
+            s_dot_terminal = max(float(longitudinal_poly.derivative(float(target.terminal_time_s), 1)), 0.0)
+            if target.target_s_m is not None and target.target_speed_mps <= 0.1:
+                s_values[past_terminal_mask] = s_terminal
+            else:
+                s_values[past_terminal_mask] = s_terminal + (s_dot_terminal * delta_t)
+            s_dot_values[past_terminal_mask] = s_dot_terminal
+            s_ddot_values[past_terminal_mask] = 0.0
+            s_jerk_values[past_terminal_mask] = 0.0
 
-            d_value = lateral_poly.value(eval_time_s)
-            d_dot = lateral_poly.derivative(eval_time_s, 1)
-            d_ddot = lateral_poly.derivative(eval_time_s, 2)
-            d_jerk = lateral_poly.derivative(eval_time_s, 3)
-            if time_s > target.terminal_time_s:
-                d_value = float(target.target_d_m)
-                d_dot = 0.0
-                d_ddot = 0.0
-                d_jerk = 0.0
+        d_values = lateral_poly.values(eval_time_s)
+        d_dot_values = lateral_poly.derivative_values(eval_time_s, 1)
+        d_ddot_values = lateral_poly.derivative_values(eval_time_s, 2)
+        d_jerk_values = lateral_poly.derivative_values(eval_time_s, 3)
+        if np.any(past_terminal_mask):
+            d_values[past_terminal_mask] = float(target.target_d_m)
+            d_dot_values[past_terminal_mask] = 0.0
+            d_ddot_values[past_terminal_mask] = 0.0
+            d_jerk_values[past_terminal_mask] = 0.0
 
-            center_point, center_heading = sample_centerline_at_s(reference_path.centerline_world, s_value)
-            normal = np.array([-np.sin(center_heading), np.cos(center_heading), 0.0], dtype=np.float32)
-            world_point = np.asarray(center_point, dtype=np.float32) + (normal * d_value)
-            world_heading = float(center_heading + np.arctan2(d_dot, max(s_dot, 1e-3)))
-            waypoint = Waypoint(
+        center_points, center_headings = self._sample_reference_points(reference_path, s_values)
+        normals = np.column_stack(
+            [
+                -np.sin(center_headings),
+                np.cos(center_headings),
+                np.zeros_like(center_headings),
+            ]
+        ).astype(np.float32)
+        world_points = center_points + (normals * d_values[:, None].astype(np.float32))
+        world_headings = center_headings + np.arctan2(d_dot_values, np.maximum(s_dot_values, 1e-3))
+        world_velocities = np.maximum(s_dot_values, 0.0)
+
+        if len(world_points) > 1:
+            delta_xy = np.diff(world_points[:, :2], axis=0)
+            segment_distances = np.maximum(np.linalg.norm(delta_xy, axis=1), 1e-3)
+            heading_deltas = np.abs(np.diff(np.unwrap(world_headings)))
+            max_curvature = float(np.max(heading_deltas / segment_distances))
+        else:
+            max_curvature = 0.0
+
+        waypoints = [
+            Waypoint(
                 x=float(world_point[0]),
                 y=float(world_point[1]),
                 yaw=float(world_heading),
-                velocity=float(max(s_dot, 0.0)),
-                timestamp=float(time_s),
+                velocity=float(world_velocity),
+                timestamp=float(timestamp_s),
             )
-            waypoints.append(waypoint)
-            headings.append(world_heading)
-
-            current_xy = np.array([waypoint.x, waypoint.y], dtype=np.float32)
-            if previous_xy is not None:
-                segment_distance = max(distance_xy(previous_xy, current_xy), 1e-3)
-                curvature = abs(world_heading - headings[-2]) / segment_distance
-                max_curvature = max(max_curvature, float(curvature))
-            previous_xy = current_xy
-
-            s_values.append(float(s_value))
-            s_dot_values.append(float(s_dot))
-            s_ddot_values.append(float(s_ddot))
-            s_jerk_values.append(float(s_jerk))
-            d_values.append(float(d_value))
-            d_dot_values.append(float(d_dot))
-            d_ddot_values.append(float(d_ddot))
-            d_jerk_values.append(float(d_jerk))
+            for world_point, world_heading, world_velocity, timestamp_s in zip(
+                world_points,
+                world_headings,
+                world_velocities,
+                time_s,
+                strict=False,
+            )
+        ]
 
         relative_progress = np.asarray(s_values, dtype=np.float64) - float(reference_projection.s)
         return _TrajectorySamples(
@@ -742,6 +830,7 @@ class FrenetMotionPlanner:
             d_ddot=np.asarray(d_ddot_values, dtype=np.float64),
             d_jerk=np.asarray(d_jerk_values, dtype=np.float64),
             relative_progress_m=relative_progress,
+            world_points_xy=np.asarray(world_points[:, :2], dtype=np.float32),
             world_waypoints=waypoints,
             max_curvature=float(max_curvature),
         )
@@ -756,8 +845,9 @@ class FrenetMotionPlanner:
         reference_path: _ReferencePath,
         target: _MotionTarget,
         samples: _TrajectorySamples,
+        run_context: _PlannerRunContext,
     ) -> str | None:
-        if target.target_lane_id in set(local_map.closed_lanes):
+        if target.target_lane_id in run_context.closed_lanes:
             return "closed_lane"
         if samples.max_curvature > self.max_curvature_rad_per_m:
             return "curvature_limit"
@@ -771,7 +861,7 @@ class FrenetMotionPlanner:
             return "temporary_boundary"
         if self._stop_line_violation(local_map, behavior_state, samples):
             return "stop_line_violation"
-        if self._dynamic_collision_violation(local_map, predictions, samples):
+        if self._dynamic_collision_violation(samples, run_context):
             return "dynamic_collision"
         if np.any(samples.relative_progress_m < -0.1):
             return "reverse_progress"
@@ -812,22 +902,18 @@ class FrenetMotionPlanner:
             polyline = np.asarray(lane.polyline_world, dtype=np.float32)
             if len(polyline) < 2:
                 continue
-            for waypoint in samples.world_waypoints:
-                point_xy = np.array([waypoint.x, waypoint.y], dtype=np.float32)
+            for point_xy in samples.world_points_xy:
                 if self._distance_to_polyline(point_xy, polyline[:, :2]) < 0.35:
                     return True
         return False
 
     def _dynamic_collision_violation(
         self,
-        local_map: LocalMap,
-        predictions: list[AgentPrediction],
         samples: _TrajectorySamples,
+        run_context: _PlannerRunContext,
     ) -> bool:
-        safety_margins = self._prediction_safety_map(local_map, predictions)
-        for index, waypoint in enumerate(samples.world_waypoints):
-            ego_xy = np.array([waypoint.x, waypoint.y], dtype=np.float32)
-            for _track_id, agent_xy, safety_margin_m in self._dynamic_samples(local_map, predictions, safety_margins, index):
+        for ego_xy, obstacles in zip(samples.world_points_xy, run_context.dynamic_obstacles_by_step, strict=False):
+            for _track_id, agent_xy, safety_margin_m in obstacles:
                 if distance_xy(ego_xy, agent_xy) < safety_margin_m:
                     return True
         return False
@@ -835,14 +921,12 @@ class FrenetMotionPlanner:
     def _dynamic_clearance(
         self,
         local_map: LocalMap,
-        predictions: list[AgentPrediction],
         samples: _TrajectorySamples,
+        run_context: _PlannerRunContext,
     ) -> _DynamicClearance:
         min_clearance_m = float("inf")
-        safety_margins = self._prediction_safety_map(local_map, predictions)
-        for index, waypoint in enumerate(samples.world_waypoints):
-            ego_xy = np.array([waypoint.x, waypoint.y], dtype=np.float32)
-            for _track_id, agent_xy, safety_margin_m in self._dynamic_samples(local_map, predictions, safety_margins, index):
+        for ego_xy, obstacles in zip(samples.world_points_xy, run_context.dynamic_obstacles_by_step, strict=False):
+            for _track_id, agent_xy, safety_margin_m in obstacles:
                 clearance_m = distance_xy(ego_xy, agent_xy) - safety_margin_m
                 min_clearance_m = min(min_clearance_m, float(clearance_m))
 
@@ -851,8 +935,7 @@ class FrenetMotionPlanner:
             boundary_points.append(np.asarray(cone.world_xyz[:2], dtype=np.float32))
         min_boundary_clearance_m = float("inf")
         if boundary_points:
-            for waypoint in samples.world_waypoints:
-                waypoint_xy = np.array([waypoint.x, waypoint.y], dtype=np.float32)
+            for waypoint_xy in samples.world_points_xy:
                 for cone_xy in boundary_points:
                     min_boundary_clearance_m = min(min_boundary_clearance_m, float(distance_xy(waypoint_xy, cone_xy)))
         elif local_map.temporary_boundaries:
@@ -860,8 +943,7 @@ class FrenetMotionPlanner:
                 polyline = np.asarray(lane.polyline_world, dtype=np.float32)
                 if len(polyline) < 2:
                     continue
-                for waypoint in samples.world_waypoints:
-                    waypoint_xy = np.array([waypoint.x, waypoint.y], dtype=np.float32)
+                for waypoint_xy in samples.world_points_xy:
                     min_boundary_clearance_m = min(
                         min_boundary_clearance_m,
                         self._distance_to_polyline(waypoint_xy, polyline[:, :2]),
@@ -901,34 +983,48 @@ class FrenetMotionPlanner:
             )
         return safety_by_track
 
-    def _dynamic_samples(
+    def _prepare_dynamic_obstacles(
         self,
         local_map: LocalMap,
         predictions: list[AgentPrediction],
         safety_margins: dict[int, float],
-        index: int,
-    ):
-        yielded_tracks: set[int] = set()
-        for prediction in predictions:
-            if prediction.predicted_trajectory:
-                sample_index = min(index, len(prediction.predicted_trajectory) - 1)
-                predicted_waypoint = prediction.predicted_trajectory[sample_index]
-                yielded_tracks.add(int(prediction.track_id))
-                yield (
-                    int(prediction.track_id),
-                    np.array([predicted_waypoint.x, predicted_waypoint.y], dtype=np.float32),
-                    float(safety_margins.get(int(prediction.track_id), self._ego_radius_m() + 1.2)),
-                )
+    ) -> list[list[tuple[int, np.ndarray, float]]]:
+        static_obstacles: list[tuple[int, np.ndarray, float]] = []
         for detection in local_map.dynamic_agents:
             track_id = int(detection.track_id)
-            if track_id in yielded_tracks:
-                continue
             centroid_xy = np.mean(np.asarray(detection.world_bbox_3d, dtype=np.float32)[:, :2], axis=0).astype(np.float32)
-            yield (
-                track_id,
-                centroid_xy,
-                float(safety_margins.get(track_id, self._ego_radius_m() + 1.2)),
+            static_obstacles.append(
+                (
+                    track_id,
+                    centroid_xy,
+                    float(safety_margins.get(track_id, self._ego_radius_m() + 1.2)),
+                )
             )
+
+        obstacles_by_step: list[list[tuple[int, np.ndarray, float]]] = []
+        for index in range(self.horizon_steps):
+            yielded_tracks: set[int] = set()
+            step_obstacles: list[tuple[int, np.ndarray, float]] = []
+            for prediction in predictions:
+                if not prediction.predicted_trajectory:
+                    continue
+                sample_index = min(index, len(prediction.predicted_trajectory) - 1)
+                predicted_waypoint = prediction.predicted_trajectory[sample_index]
+                track_id = int(prediction.track_id)
+                yielded_tracks.add(track_id)
+                step_obstacles.append(
+                    (
+                        track_id,
+                        np.array([predicted_waypoint.x, predicted_waypoint.y], dtype=np.float32),
+                        float(safety_margins.get(track_id, self._ego_radius_m() + 1.2)),
+                    )
+                )
+            for track_id, centroid_xy, safety_margin_m in static_obstacles:
+                if track_id in yielded_tracks:
+                    continue
+                step_obstacles.append((track_id, centroid_xy, safety_margin_m))
+            obstacles_by_step.append(step_obstacles)
+        return obstacles_by_step
 
     def _synthesize_stop_candidate(
         self,
@@ -938,6 +1034,7 @@ class FrenetMotionPlanner:
         predictions: list[AgentPrediction],
         behavior_state: BehaviorState,
         reference_path: _ReferencePath,
+        run_context: _PlannerRunContext,
     ) -> PlannerCandidate | None:
         stop_progress_m = self._behavior_stop_progress(
             local_map,
@@ -959,6 +1056,7 @@ class FrenetMotionPlanner:
             behavior_state=behavior_state,
             reference_path=reference_path,
             target=stop_target,
+            run_context=run_context,
         )
         if candidate.feasible:
             return candidate
