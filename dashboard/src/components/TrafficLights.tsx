@@ -33,11 +33,20 @@ export default function TrafficLights() {
 
     disposeObject3D(group);
 
-    const anchoredTrafficLights = frame["visualization/world_layer"]?.traffic_lights ?? [];
+    const priorAnchors = frame["visualization/prior_map"]?.traffic_lights ?? [];
+    const liveAnchors = frame["visualization/world_layer"]?.traffic_lights ?? [];
+    const liveByActorId = new Map<number, typeof liveAnchors[number]>();
+    for (const signal of liveAnchors) {
+      liveByActorId.set(signal.actor_id, signal);
+    }
+    const anchoredTrafficLights = priorAnchors.map((signal) => ({
+      ...signal,
+      ...(liveByActorId.get(signal.actor_id) ?? {}),
+    }));
     if (isNavigationFirstMode() && anchoredTrafficLights.length > 0) {
       for (const signal of anchoredTrafficLights) {
         const world = signal.world_xyz;
-        if (!world || world.length < 2 || signal.visibility_class === "background") continue;
+        if (!world || world.length < 2) continue;
 
         const marker = new THREE.Group();
         const scenePosition = worldToScene(world);

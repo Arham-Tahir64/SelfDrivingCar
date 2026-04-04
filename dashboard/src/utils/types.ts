@@ -250,6 +250,24 @@ export interface WorldLayerPayload {
   traffic_lights: WorldTrafficLight[];
 }
 
+export interface PriorMapBounds {
+  min_x: number;
+  max_x: number;
+  min_y: number;
+  max_y: number;
+}
+
+export interface PriorMapPayload {
+  map_name: string;
+  signature: string;
+  bounds_world: PriorMapBounds;
+  roads: WorldRoad[];
+  lane_markers: WorldLaneMarker[];
+  sidewalks: WorldSidewalk[];
+  traffic_lights: WorldTrafficLight[];
+  route_polyline_world: number[][];
+}
+
 export interface PipelineFrame {
   tick_id: number;
   sim_time_s: number;
@@ -269,6 +287,7 @@ export interface PipelineFrame {
   "visualization/bev_drivable"?: BEVDrivableGrid;
   "visualization/road_corridor"?: RoadCorridorPayload;
   "visualization/world_layer"?: WorldLayerPayload;
+  "visualization/prior_map"?: PriorMapPayload;
   "pipeline/latency"?: PipelineLatency;
 }
 

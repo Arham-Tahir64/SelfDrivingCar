@@ -30,7 +30,9 @@ _WS_TOPICS = frozenset(
         TopicName.SCENARIO_INFO.value,
         TopicName.VISUALIZATION_CAMERA_OVERLAY.value,
         TopicName.VISUALIZATION_BEV_DRIVABLE.value,
+        TopicName.VISUALIZATION_ROAD_CORRIDOR.value,
         TopicName.VISUALIZATION_WORLD_LAYER.value,
+        TopicName.VISUALIZATION_PRIOR_MAP.value,
         TopicName.SENSOR_LIDAR.value,
         TopicName.PIPELINE_LATENCY.value,
     }
@@ -50,6 +52,7 @@ _RETAINED_TOPICS = frozenset(
         TopicName.SCENARIO_INFO.value,
         TopicName.MAP_LOCAL_MAP.value,
         TopicName.VISUALIZATION_WORLD_LAYER.value,
+        TopicName.VISUALIZATION_PRIOR_MAP.value,
     }
 )
 
@@ -62,6 +65,7 @@ _FAST_DYNAMIC_TOPICS = frozenset(
         TopicName.CONTROL_VEHICLE_COMMAND.value,
         TopicName.PLANNING_EGO_TRAJECTORY.value,
         TopicName.PIPELINE_LATENCY.value,
+        TopicName.VISUALIZATION_ROAD_CORRIDOR.value,
         TopicName.VISUALIZATION_WORLD_LAYER.value,
     }
 )
@@ -598,6 +602,14 @@ class WebSocketBridge:
             retained[TopicName.VISUALIZATION_WORLD_LAYER.value] = static_world_layer
         if dynamic_world_layer is not None:
             dynamic[TopicName.VISUALIZATION_WORLD_LAYER.value] = dynamic_world_layer
+
+        prior_map = snapshot.get(TopicName.VISUALIZATION_PRIOR_MAP.value)
+        if prior_map is not None:
+            retained[TopicName.VISUALIZATION_PRIOR_MAP.value] = _serialize_payload(prior_map)
+
+        road_corridor = snapshot.get(TopicName.VISUALIZATION_ROAD_CORRIDOR.value)
+        if road_corridor is not None:
+            dynamic[TopicName.VISUALIZATION_ROAD_CORRIDOR.value] = _serialize_payload(road_corridor)
 
         for topic in (
             TopicName.LOCALIZATION_EGO_POSE.value,

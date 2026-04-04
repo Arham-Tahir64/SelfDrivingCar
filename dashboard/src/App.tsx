@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 import { Canvas } from "@react-three/fiber";
 import { useWebSocket } from "./hooks/useWebSocket";
-import BEVScene from "./components/BEVScene";
+import MapScene from "./components/MapScene";
 import HUD from "./components/HUD";
 import CameraPanel from "./components/CameraPanel";
 import LidarPanel from "./components/LidarPanel";
@@ -31,7 +31,7 @@ export default function App() {
           gl={{ antialias: true, alpha: false }}
           style={{ background: "#0a0a0f" }}
         >
-          <BEVScene />
+          <MapScene />
         </Canvas>
         <HUD />
         <PlaybackControls />

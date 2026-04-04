@@ -79,6 +79,8 @@ class BEVDrivableProjector:
         self._corridor_cache_payload: dict[str, Any] | None = None
         self._world_layer_cache_key: tuple[str, ...] | None = None
         self._world_layer_cache_payload: dict[str, Any] | None = None
+        self._prior_map_cache_key: tuple[Any, ...] | None = None
+        self._prior_map_cache_payload: dict[str, Any] | None = None
 
     def _normalise_calibration(
         self,
@@ -619,6 +621,169 @@ class BEVDrivableProjector:
                 float(np.linalg.norm(np.asarray(signal.get("world_xyz", [0.0, 0.0]))[:2] - ego_xy)),
             )
         )
+        return payload
+
+    def build_prior_map(
+        self,
+        *,
+        lane_graph: Any,
+        map_name: str,
+        route_plan: RoutePlan | None = None,
+        stable_traffic_lights: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        segments = getattr(lane_graph, "segments", None)
+        if not segments:
+            return {
+                "map_name": str(map_name),
+                "signature": "",
+                "bounds_world": {"min_x": 0.0, "max_x": 0.0, "min_y": 0.0, "max_y": 0.0},
+                "roads": [],
+                "lane_markers": [],
+                "sidewalks": [],
+                "traffic_lights": [],
+                "route_polyline_world": [],
+            }
+
+        ordered_lane_ids = tuple(sorted(str(lane_id) for lane_id in segments.keys()))
+        route_signature = tuple(
+            (
+                round(float(waypoint.x), 1),
+                round(float(waypoint.y), 1),
+                round(float(getattr(waypoint, "z", 0.0)), 1),
+            )
+            for waypoint in list(getattr(route_plan, "waypoints", []) or [])
+        )
+        traffic_signature = tuple(
+            sorted(
+                (
+                    int(anchor.get("actor_id", -1)),
+                    round(float((anchor.get("world_xyz", [0.0, 0.0, 0.0]) or [0.0, 0.0, 0.0])[0]), 1),
+                    round(float((anchor.get("world_xyz", [0.0, 0.0, 0.0]) or [0.0, 0.0, 0.0])[1]), 1),
+                )
+                for anchor in list(stable_traffic_lights or [])
+            )
+        )
+        cache_key = (str(map_name), ordered_lane_ids, route_signature, traffic_signature)
+        if cache_key == self._prior_map_cache_key and self._prior_map_cache_payload is not None:
+            return self._prior_map_cache_payload
+
+        roads: list[dict[str, Any]] = []
+        lane_markers: list[dict[str, Any]] = []
+        sidewalks: list[dict[str, Any]] = []
+        boundary_registry: dict[tuple[tuple[float, float], ...], list[dict[str, Any]]] = {}
+        bounds_points: list[np.ndarray] = []
+
+        for lane_id in ordered_lane_ids:
+            lane = segments[str(lane_id)]
+            centerline = np.asarray(lane.centerline_world, dtype=np.float32)
+            left_boundary, right_boundary = self._lane_boundaries(lane)
+            if len(centerline) < 2 or len(left_boundary) < 2 or len(right_boundary) < 2:
+                continue
+            polygon_world = np.vstack([left_boundary, right_boundary[::-1]]).astype(np.float32)
+            roads.append(
+                {
+                    "lane_id": lane.lane_id,
+                    "polygon_world": polygon_world.tolist(),
+                    "centerline_world": centerline.tolist(),
+                    "is_route": False,
+                    "is_junction": bool(lane.is_junction),
+                }
+            )
+            bounds_points.append(polygon_world[:, :2])
+            for side, boundary in (("left", left_boundary), ("right", right_boundary)):
+                signature = self._polyline_signature(boundary)
+                boundary_registry.setdefault(signature, []).append(
+                    self._boundary_registry_entry(
+                        lane_id=lane.lane_id,
+                        side=side,
+                        centerline_world=centerline,
+                        boundary_world=boundary,
+                        visibility_class="route",
+                        is_junction=bool(lane.is_junction),
+                    )
+                )
+
+        for index, (_signature, entries) in enumerate(boundary_registry.items()):
+            if len(entries) >= 2:
+                if any(bool(entry["is_junction"]) for entry in entries):
+                    continue
+                boundary_world = np.asarray(entries[0]["boundary_world"], dtype=np.float32)
+                lane_markers.append(
+                    {
+                        "marker_id": f"prior-marker:{index}",
+                        "polyline_world": boundary_world.tolist(),
+                        "is_route": False,
+                    }
+                )
+                bounds_points.append(boundary_world[:, :2])
+                continue
+            sidewalk_polygon = self._sidewalk_polygon_world(entries[0])
+            if len(sidewalk_polygon) < 3:
+                continue
+            boundary_world = np.asarray(entries[0]["boundary_world"], dtype=np.float32)
+            sidewalks.append(
+                {
+                    "sidewalk_id": f"prior-sidewalk:{index}",
+                    "polygon_world": sidewalk_polygon.tolist(),
+                    "edge_world": boundary_world.tolist(),
+                    "is_route_adjacent": False,
+                }
+            )
+            bounds_points.append(sidewalk_polygon[:, :2])
+            bounds_points.append(boundary_world[:, :2])
+
+        route_polyline_world = [
+            [float(waypoint.x), float(waypoint.y), float(getattr(waypoint, "z", 0.0))]
+            for waypoint in list(getattr(route_plan, "waypoints", []) or [])
+        ]
+        if route_polyline_world:
+            bounds_points.append(np.asarray(route_polyline_world, dtype=np.float32)[:, :2])
+
+        traffic_lights = [
+            {
+                "actor_id": int(anchor.get("actor_id", -1)),
+                "world_xyz": list(anchor.get("world_xyz", [0.0, 0.0, 0.0])),
+                "yaw_deg": float(anchor.get("yaw_deg", 0.0)),
+                "state": str(anchor.get("state", "UNKNOWN")),
+                "confidence": 0.35,
+            }
+            for anchor in list(stable_traffic_lights or [])
+        ]
+        for traffic_light in traffic_lights:
+            bounds_points.append(np.asarray(traffic_light["world_xyz"], dtype=np.float32)[None, :2])
+
+        if bounds_points:
+            stacked_points = np.vstack(bounds_points)
+            bounds_world = {
+                "min_x": float(np.min(stacked_points[:, 0])),
+                "max_x": float(np.max(stacked_points[:, 0])),
+                "min_y": float(np.min(stacked_points[:, 1])),
+                "max_y": float(np.max(stacked_points[:, 1])),
+            }
+        else:
+            bounds_world = {"min_x": 0.0, "max_x": 0.0, "min_y": 0.0, "max_y": 0.0}
+
+        payload = {
+            "map_name": str(map_name),
+            "signature": "|".join(
+                [
+                    str(map_name),
+                    str(len(roads)),
+                    str(len(lane_markers)),
+                    str(len(sidewalks)),
+                    str(len(route_polyline_world)),
+                    str(len(traffic_lights)),
+                ]
+            ),
+            "bounds_world": bounds_world,
+            "roads": roads,
+            "lane_markers": lane_markers,
+            "sidewalks": sidewalks,
+            "traffic_lights": traffic_lights,
+            "route_polyline_world": route_polyline_world,
+        }
+        self._prior_map_cache_key = cache_key
+        self._prior_map_cache_payload = payload
         return payload
 
     def build_world_layer(

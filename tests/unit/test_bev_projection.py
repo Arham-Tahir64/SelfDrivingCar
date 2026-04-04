@@ -427,3 +427,49 @@ def test_world_layer_merges_live_traffic_light_state_onto_stable_anchor() -> Non
     assert signal["state"] == "GREEN"
     assert signal["visibility_class"] == "route"
     assert abs(signal["confidence"] - 0.92) < 1e-6
+
+
+def test_prior_map_builds_full_static_geometry_and_route_polyline() -> None:
+    projector = BEVDrivableProjector()
+    lane_a = _static_lane("lane_a", x0=-10.0, x1=30.0, center_y=0.0)
+    lane_b = _static_lane("lane_b", x0=-10.0, x1=30.0, center_y=3.5)
+    lane_graph = type("LaneGraph", (), {"segments": {"lane_a": lane_a, "lane_b": lane_b}})()
+    stable_anchor = {
+        "actor_id": 101,
+        "world_xyz": [8.0, 1.5, 3.2],
+        "yaw_deg": 90.0,
+        "state": "RED",
+    }
+
+    payload = projector.build_prior_map(
+        lane_graph=lane_graph,
+        map_name="Town01",
+        route_plan=_route_plan(),
+        stable_traffic_lights=[stable_anchor],
+    )
+
+    assert payload["map_name"] == "Town01"
+    assert len(payload["roads"]) == 2
+    assert len(payload["lane_markers"]) == 1
+    assert len(payload["sidewalks"]) == 2
+    assert len(payload["route_polyline_world"]) == len(_route_plan().waypoints)
+    assert len(payload["traffic_lights"]) == 1
+
+
+def test_prior_map_bounds_cover_route_and_static_geometry() -> None:
+    projector = BEVDrivableProjector()
+    lane = _static_lane("lane_001", x0=-25.0, x1=45.0, center_y=0.0)
+    lane_graph = type("LaneGraph", (), {"segments": {"lane_001": lane}})()
+
+    payload = projector.build_prior_map(
+        lane_graph=lane_graph,
+        map_name="Town02",
+        route_plan=_route_plan(),
+        stable_traffic_lights=[],
+    )
+
+    bounds = payload["bounds_world"]
+    assert bounds["min_x"] <= -25.0
+    assert bounds["max_x"] >= 45.0
+    assert bounds["min_y"] < 0.0
+    assert bounds["max_y"] > 0.0

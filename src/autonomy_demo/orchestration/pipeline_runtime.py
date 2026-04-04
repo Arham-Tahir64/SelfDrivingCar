@@ -93,6 +93,19 @@ class PipelineRuntime:
                     "max_duration_s": scenario.max_duration_s,
                 },
             )
+            lane_graph_provider = getattr(self.mapping, "lane_graph_provider", None)
+            lane_graph = getattr(lane_graph_provider, "lane_graph", None)
+            if lane_graph is not None:
+                prior_map = bev_projector.build_prior_map(
+                    lane_graph=lane_graph,
+                    map_name=scenario.map_name,
+                    route_plan=getattr(self.motion_planner, "route_plan", None),
+                    stable_traffic_lights=stable_traffic_light_anchors,
+                )
+                self.context.event_bus.publish(
+                    TopicName.VISUALIZATION_PRIOR_MAP.value,
+                    prior_map,
+                )
             for tick_id in range(max_ticks):
                 self.simulation.tick(tick_id)
                 sim_time_s = tick_id / 20.0
