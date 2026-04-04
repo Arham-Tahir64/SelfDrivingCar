@@ -22,7 +22,7 @@ visualization:
   ws_port: 8765
 perception:
   mode: camera_v1
-  device: cpu
+  device: cuda
   model_variant: CarlaObject26.pt
 evaluation:
   latency_budget_ms:

@@ -25,15 +25,27 @@ class SegFormerDrivableExtractor:
     Cached result is returned on skipped ticks.
     """
 
-    def __init__(self, *, device: str = "cuda", run_every_n_ticks: int = 5) -> None:
+    def __init__(
+        self,
+        *,
+        device: str = "cuda",
+        run_every_n_ticks: int = 5,
+        max_input_long_edge_px: int | None = None,
+    ) -> None:
         self._device = device if torch.cuda.is_available() else "cpu"
         self._model = None
         self._processor = None
         self._load_attempted = False
         self._last_inference_ms: float = 0.0
-        self._run_every_n_ticks = run_every_n_ticks
+        self._run_every_n_ticks = max(int(run_every_n_ticks), 1)
+        self._max_input_long_edge_px = (
+            None
+            if max_input_long_edge_px is None or int(max_input_long_edge_px) <= 0
+            else int(max_input_long_edge_px)
+        )
         self._tick_counter: int = 0
         self._cached_result: DrivableSpaceMask | None = None
+        self._ran_inference_last_call = False
 
     def _ensure_loaded(self) -> bool:
         if self._model is not None:
@@ -63,6 +75,7 @@ class SegFormerDrivableExtractor:
         Returns None only if model is unavailable (caller falls back to heuristic).
         """
         self._tick_counter += 1
+        self._ran_inference_last_call = False
 
         # Return cached result on non-inference ticks
         if self._tick_counter % self._run_every_n_ticks != 1:
@@ -78,10 +91,11 @@ class SegFormerDrivableExtractor:
             return None
 
         height, width = image.shape[:2]
+        model_image = self._downscale_image(image)
 
         t0 = time.perf_counter()
         try:
-            inputs = self._processor(images=image, return_tensors="pt")  # type: ignore[misc]
+            inputs = self._processor(images=model_image, return_tensors="pt")  # type: ignore[misc]
             inputs = {k: v.to(self._device) for k, v in inputs.items()}
 
             with torch.no_grad():
@@ -122,7 +136,25 @@ class SegFormerDrivableExtractor:
             source_sensor_id=sensor_id,
         )
         self._cached_result = result
+        self._ran_inference_last_call = True
         return result
+
+    def _downscale_image(self, image: np.ndarray) -> np.ndarray:
+        if self._max_input_long_edge_px is None:
+            return image
+        height, width = image.shape[:2]
+        long_edge = max(height, width)
+        if long_edge <= self._max_input_long_edge_px:
+            return image
+        scale = self._max_input_long_edge_px / float(long_edge)
+        resized_width = max(int(round(width * scale)), 1)
+        resized_height = max(int(round(height * scale)), 1)
+        try:
+            import cv2  # type: ignore
+
+            return cv2.resize(image, (resized_width, resized_height), interpolation=cv2.INTER_AREA)
+        except Exception:
+            return image
 
     def _road_mask(self, pred_classes: np.ndarray, road_prob: np.ndarray) -> np.ndarray:
         candidate = (pred_classes == ROAD_CLASS_ID) & (road_prob >= 0.35)
@@ -192,3 +224,7 @@ class SegFormerDrivableExtractor:
     @property
     def last_inference_ms(self) -> float:
         return self._last_inference_ms
+
+    @property
+    def ran_inference_last_call(self) -> bool:
+        return self._ran_inference_last_call

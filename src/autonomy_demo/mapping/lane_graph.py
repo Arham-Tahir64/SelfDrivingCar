@@ -30,7 +30,7 @@ def parse_lane_id(lane_id: str) -> tuple[int, int, int] | None:
             int(section_text.split("_", 1)[1]),
             int(lane_text.split("_", 1)[1]),
         )
-    except Exception:
+    except (ValueError, IndexError, AttributeError):
         return None
 
 
@@ -337,7 +337,7 @@ def build_lane_graph_from_world(world, carla_module, *, step_m: float = 4.0) -> 
                     if "speed_limit" in str(getattr(landmark, "type", "")):
                         speed_limit_mps = float(getattr(landmark, "value", speed_limit_mps * 3.6)) / 3.6
                         break
-            except Exception:
+            except (AttributeError, ValueError, TypeError):
                 pass
         segments[lane_id] = StaticLaneSegment(
             lane_id=lane_id,

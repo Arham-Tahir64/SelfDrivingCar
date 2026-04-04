@@ -424,3 +424,4 @@ class RuntimeConfig:
     ws_host: str = "0.0.0.0"
     ws_port: int = 8765
     enable_learned_perception: bool = True
+    tuning: dict[str, Any] = field(default_factory=dict)

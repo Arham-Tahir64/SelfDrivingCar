@@ -18,8 +18,25 @@ from autonomy_demo.interfaces.contracts import (
     VisualizationSink,
 )
 from autonomy_demo.interfaces.enums import TopicName
+from autonomy_demo.common.logging import get_logger
 from autonomy_demo.interfaces.types import ReplayFrame, ScenarioConfig
 from autonomy_demo.perception.bev_projection import BEVDrivableProjector
+
+_logger = get_logger(__name__)
+
+_TOP_LEVEL_LATENCY_KEYS = (
+    "perception",
+    "localization",
+    "mapping",
+    "prediction",
+    "planning",
+    "control",
+)
+
+_AUXILIARY_LATENCY_KEYS = (
+    "segformer_drivable",
+    "learned_lanes",
+)
 
 
 def _time_ms() -> float:
@@ -76,6 +93,19 @@ class PipelineRuntime:
                     "max_duration_s": scenario.max_duration_s,
                 },
             )
+            lane_graph_provider = getattr(self.mapping, "lane_graph_provider", None)
+            lane_graph = getattr(lane_graph_provider, "lane_graph", None)
+            if lane_graph is not None:
+                prior_map = bev_projector.build_prior_map(
+                    lane_graph=lane_graph,
+                    map_name=scenario.map_name,
+                    route_plan=getattr(self.motion_planner, "route_plan", None),
+                    stable_traffic_lights=stable_traffic_light_anchors,
+                )
+                self.context.event_bus.publish(
+                    TopicName.VISUALIZATION_PRIOR_MAP.value,
+                    prior_map,
+                )
             for tick_id in range(max_ticks):
                 self.simulation.tick(tick_id)
                 sim_time_s = tick_id / 20.0
@@ -91,11 +121,8 @@ class PipelineRuntime:
                 detections, lanes, drivable_space, traffic_lights, _cones = self.perception.run(bundle)
                 t1 = _time_ms()
                 latency.record("perception", t1 - t0)
-                # Record learned perception sub-latencies if available
-                if "drivable_inference_ms" in bundle.metadata:
-                    latency.record("segformer_drivable", bundle.metadata["drivable_inference_ms"])
-                if "lane_inference_ms" in bundle.metadata:
-                    latency.record("learned_lanes", bundle.metadata["lane_inference_ms"])
+                latency.record("segformer_drivable", float(bundle.metadata.get("drivable_inference_ms", 0.0)))
+                latency.record("learned_lanes", float(bundle.metadata.get("lane_inference_ms", 0.0)))
 
                 bundle.metadata["debug_perception_detections"] = detections
                 if self.visualization and hasattr(self.visualization, "update_bundle"):
@@ -147,8 +174,10 @@ class PipelineRuntime:
                             ego_pose,
                             sim_time_s=float(sim_time_s),
                         )
+                except (ValueError, TypeError, KeyError) as exc:
+                    _logger.debug("BEV projection skipped for tick %s: %s", tick_id, exc)
                 except Exception:
-                    pass
+                    _logger.warning("BEV projection failed for tick %s", tick_id, exc_info=True)
 
                 t0 = _time_ms()
                 predictions = self.prediction.run(local_map)
@@ -205,7 +234,9 @@ class PipelineRuntime:
 
                 # Publish per-tick latency for the dashboard
                 tick_latency = latency.latest()
-                tick_latency["total"] = sum(tick_latency.values())
+                tick_latency["total"] = sum(float(tick_latency.get(key, 0.0)) for key in _TOP_LEVEL_LATENCY_KEYS)
+                auxiliary_total = sum(float(tick_latency.get(key, 0.0)) for key in _AUXILIARY_LATENCY_KEYS)
+                tick_latency["perception_aux_total"] = auxiliary_total
                 self.context.event_bus.publish(TopicName.PIPELINE_LATENCY.value, tick_latency)
 
                 self.context.event_bus.publish(

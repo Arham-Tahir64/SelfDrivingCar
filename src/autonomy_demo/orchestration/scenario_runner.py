@@ -146,9 +146,22 @@ class ScenarioRunner:
         mapping = build_mapping_module(self.runtime_config, lane_graph_provider)
         prediction = build_prediction_module(self.runtime_config)
         if self.runtime_config.backend == "carla":
-            behavior_planner = RuleBasedBehaviorPlanner()
-            motion_planner = FrenetMotionPlanner()
-            controller = RouteFollowerController()
+            tuning = getattr(self.runtime_config, "tuning", {}) or {}
+            behavior_tuning = tuning.get("behavior", {})
+            planning_tuning = tuning.get("planning", {})
+            control_tuning = tuning.get("control", {})
+            behavior_planner = RuleBasedBehaviorPlanner(**{
+                k: v for k, v in behavior_tuning.items()
+                if k in RuleBasedBehaviorPlanner.__init__.__code__.co_varnames
+            }) if behavior_tuning else RuleBasedBehaviorPlanner()
+            motion_planner = FrenetMotionPlanner(**{
+                k: v for k, v in planning_tuning.items()
+                if k in FrenetMotionPlanner.__init__.__code__.co_varnames
+            }) if planning_tuning else FrenetMotionPlanner()
+            controller = RouteFollowerController(**{
+                k: v for k, v in control_tuning.items()
+                if k in RouteFollowerController.__init__.__code__.co_varnames
+            }) if control_tuning else RouteFollowerController()
             evaluation = LiveEvaluationHarness(
                 scenario,
                 tick_hz=self.runtime_config.tick_hz,

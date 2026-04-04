@@ -320,7 +320,12 @@ class RouteFollowerController:
                 projection = project_point_to_centerline(current_lane.centerline_world, center_xyz)
                 longitudinal_gap = float(projection.s - ego_projection.s)
                 lateral_gap = float(abs(projection.d))
-                if longitudinal_gap <= 0.0 or lateral_gap > self.lead_lane_tolerance_m:
+                is_camera_projection = (
+                    str(getattr(detection, "position_estimate_kind", "")) == "camera_projection"
+                )
+                if longitudinal_gap <= 0.0:
+                    continue
+                if lateral_gap > self.lead_lane_tolerance_m and not is_camera_projection:
                     continue
             if bbox_height < 16.0 or bbox_width < 14.0:
                 continue

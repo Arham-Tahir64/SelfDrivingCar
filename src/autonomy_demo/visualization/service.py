@@ -12,9 +12,10 @@ from autonomy_demo.interfaces.enums import TopicName
 from autonomy_demo.interfaces.types import CameraFrame, ControlCommand, DrivableSpaceMask, EgoPose, EgoTrajectory, LaneLine, LocalMap, ObjectDetection, TrafficLightDetection
 
 
-def _is_image_grounded_bbox(bbox_xyxy: np.ndarray | None, *, position_estimate_kind: str) -> bool:
-    if bbox_xyxy is None:
-        return False
+def _has_image_bbox(bbox_xyxy: np.ndarray | None) -> bool:
+    return bbox_xyxy is not None
+
+def _is_camera_grounded(position_estimate_kind: str) -> bool:
     return str(position_estimate_kind) == "camera_projection"
 
 
@@ -93,20 +94,23 @@ class NullVisualizationService:
             )
             frame = overlay.astype(np.uint8)
         for detection in self._latest_detections:
-            if not _is_image_grounded_bbox(
-                detection.image_bbox_xyxy,
-                position_estimate_kind=detection.position_estimate_kind,
-            ):
+            if not _has_image_bbox(detection.image_bbox_xyxy):
                 continue
             x1, y1, x2, y2 = detection.image_bbox_xyxy.astype(int).tolist()
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 255), 2)
+            is_ml = _is_camera_grounded(detection.position_estimate_kind)
+            box_color = (0, 255, 255) if is_ml else (120, 180, 180)
+            thickness = 2 if is_ml else 1
+            cv2.rectangle(frame, (x1, y1), (x2, y2), box_color, thickness)
+            label = f"{detection.object_class.value}:{detection.track_id}"
+            if not is_ml:
+                label += " [gt]"
             cv2.putText(
                 frame,
-                f"{detection.object_class.value}:{detection.track_id}",
+                label,
                 (x1, max(y1 - 6, 0)),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.45,
-                (0, 255, 255),
+                box_color,
                 1,
                 cv2.LINE_AA,
             )
@@ -114,10 +118,7 @@ class NullVisualizationService:
             polyline = lane.polyline_image.astype(np.int32).reshape((-1, 1, 2))
             cv2.polylines(frame, [polyline], False, (255, 255, 0), 2)
         for traffic_light in self._latest_traffic_lights:
-            if not _is_image_grounded_bbox(
-                traffic_light.image_bbox_xyxy,
-                position_estimate_kind=traffic_light.position_estimate_kind,
-            ):
+            if not _has_image_bbox(traffic_light.image_bbox_xyxy):
                 continue
             x1, y1, x2, y2 = traffic_light.image_bbox_xyxy.astype(int).tolist()
             color = {

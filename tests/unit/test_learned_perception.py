@@ -2,12 +2,39 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+import torch
 
 from autonomy_demo.interfaces.enums import LaneLineType
 from autonomy_demo.interfaces.types import DrivableSpaceMask, LaneLine
 
 
 # ---------- SegFormer drivable space tests ----------
+
+
+class _FakeSegformerProcessor:
+    def __init__(self) -> None:
+        self.last_image_shape: tuple[int, int] | None = None
+
+    def __call__(self, images, return_tensors: str):  # noqa: ANN001
+        self.last_image_shape = tuple(images.shape[:2])
+        return {"pixel_values": torch.zeros((1, 3, 8, 8), dtype=torch.float32)}
+
+
+class _FakeSegformerOutputs:
+    def __init__(self) -> None:
+        logits = torch.zeros((1, 19, 2, 2), dtype=torch.float32)
+        logits[:, 0, :, :] = 10.0
+        self.logits = logits
+
+
+class _FakeSegformerModel:
+    def __call__(self, **inputs):  # noqa: ANN003
+        return _FakeSegformerOutputs()
+
+
+class _FakeLaneModel:
+    def __call__(self, tensor):  # noqa: ANN001
+        return torch.zeros((1, 1), dtype=torch.float32)
 
 def test_segformer_extractor_loads_and_runs() -> None:
     from autonomy_demo.perception.segformer_drivable import SegFormerDrivableExtractor
@@ -43,6 +70,44 @@ def test_segformer_drivable_mask_is_not_all_zeros() -> None:
     assert result is not None
     # At least some pixels should be drivable
     assert result.mask.any()
+
+
+def test_segformer_extractor_returns_cached_result_on_skipped_ticks_without_reporting_inference() -> None:
+    from autonomy_demo.perception.segformer_drivable import SegFormerDrivableExtractor
+
+    extractor = SegFormerDrivableExtractor(device="cpu", run_every_n_ticks=2)
+    fake_processor = _FakeSegformerProcessor()
+    extractor._processor = fake_processor
+    extractor._model = _FakeSegformerModel()
+    extractor._ensure_loaded = lambda: True  # type: ignore[method-assign]
+    image = np.random.randint(0, 255, (128, 256, 3), dtype=np.uint8)
+
+    first = extractor.extract(image, "front_camera")
+    second = extractor.extract(image, "front_camera")
+
+    assert first is not None
+    assert second is first
+    assert extractor.ran_inference_last_call is False
+    assert second.mask.shape == (128, 256)
+
+
+def test_segformer_extractor_downscales_input_but_preserves_output_shape() -> None:
+    from autonomy_demo.perception.segformer_drivable import SegFormerDrivableExtractor
+
+    extractor = SegFormerDrivableExtractor(device="cpu", max_input_long_edge_px=128)
+    fake_processor = _FakeSegformerProcessor()
+    extractor._processor = fake_processor
+    extractor._model = _FakeSegformerModel()
+    extractor._ensure_loaded = lambda: True  # type: ignore[method-assign]
+    image = np.random.randint(0, 255, (256, 512, 3), dtype=np.uint8)
+
+    result = extractor.extract(image, "front_camera")
+
+    assert result is not None
+    assert fake_processor.last_image_shape is not None
+    assert max(fake_processor.last_image_shape) <= 128
+    assert result.mask.shape == (256, 512)
+    assert result.class_probabilities.shape == (256, 512, 2)
 
 
 # ---------- Learned lane detector tests ----------
@@ -87,6 +152,57 @@ def test_learned_lane_extractor_collects_training_data() -> None:
     assert len(extractor._training_buffer) == 1
 
 
+def test_learned_lane_extractor_live_mode_disables_online_training() -> None:
+    from autonomy_demo.perception.learned_lane_detection import LearnedLaneExtractor
+
+    extractor = LearnedLaneExtractor(device="cpu", allow_online_training=False)
+    image = np.random.randint(0, 255, (256, 512, 3), dtype=np.uint8)
+    fake_lanes = [
+        LaneLine(
+            lane_id="lane_left",
+            polyline_image=np.array([[200, 240], [210, 200], [220, 160], [230, 120]], dtype=np.float32),
+            polyline_world=np.zeros((4, 3), dtype=np.float32),
+            line_type=LaneLineType.SOLID,
+            confidence=0.8,
+        ),
+        LaneLine(
+            lane_id="lane_right",
+            polyline_image=np.array([[300, 240], [310, 200], [320, 160], [330, 120]], dtype=np.float32),
+            polyline_world=np.zeros((4, 3), dtype=np.float32),
+            line_type=LaneLineType.SOLID,
+            confidence=0.8,
+        ),
+    ]
+
+    result = extractor.extract(image, sensor_id="front_camera", heuristic_lanes=fake_lanes)
+
+    assert result is None
+    assert len(extractor._training_buffer) == 0
+    assert extractor.is_trained is False
+
+
+def test_learned_lane_extractor_respects_inference_cadence_when_trained() -> None:
+    from autonomy_demo.perception.learned_lane_detection import LearnedLaneExtractor
+
+    extractor = LearnedLaneExtractor(device="cpu", run_every_n_ticks=2, allow_online_training=False)
+    extractor._trained = True
+    extractor._model = _FakeLaneModel()
+    extractor._image_to_tensor = lambda image: torch.zeros((1, 3, 160, 288), dtype=torch.float32)  # type: ignore[method-assign]
+    extractor._decode_predictions = lambda logits, image_width, image_height: [  # type: ignore[method-assign]
+        np.array([[100.0, 240.0], [110.0, 200.0], [120.0, 160.0], [130.0, 120.0]], dtype=np.float32),
+        np.array([[300.0, 240.0], [310.0, 200.0], [320.0, 160.0], [330.0, 120.0]], dtype=np.float32),
+    ]
+    image = np.random.randint(0, 255, (256, 512, 3), dtype=np.uint8)
+
+    first = extractor.extract(image, sensor_id="front_camera")
+    assert first is not None
+    assert extractor.ran_inference_last_call is True
+    second = extractor.extract(image, sensor_id="front_camera")
+
+    assert extractor.ran_inference_last_call is False
+    assert second is None
+
+
 def test_learned_lane_extractor_invalid_input_returns_none() -> None:
     from autonomy_demo.perception.learned_lane_detection import LearnedLaneExtractor
 
@@ -113,3 +229,45 @@ def test_perception_stack_skips_learned_when_disabled() -> None:
     stack = PerceptionStack(device="cpu", model_variant="bootstrap", enable_learned_perception=False)
     assert stack.learned_drivable_extractor is None
     assert stack.learned_lane_extractor is None
+
+
+def test_build_perception_module_disables_aux_perception_for_live_cpu_by_default() -> None:
+    from autonomy_demo.perception.module import build_perception_module
+
+    runtime = type(
+        "Runtime",
+        (),
+        {
+            "backend": "carla",
+            "perception_mode": "camera_v1",
+            "perception_device": "cpu",
+            "perception_model_variant": "bootstrap",
+            "enable_learned_perception": True,
+            "tuning": {},
+        },
+    )()
+    module = build_perception_module(runtime)
+    assert module.learned_drivable_extractor is None
+    assert module.learned_lane_extractor is None
+
+
+def test_build_perception_module_throttles_segformer_for_live_gpu_by_default() -> None:
+    from autonomy_demo.perception.module import build_perception_module
+
+    runtime = type(
+        "Runtime",
+        (),
+        {
+            "backend": "carla",
+            "perception_mode": "camera_v1",
+            "perception_device": "cuda",
+            "perception_model_variant": "bootstrap",
+            "enable_learned_perception": True,
+            "tuning": {},
+        },
+    )()
+    module = build_perception_module(runtime)
+    assert module.learned_drivable_extractor is not None
+    assert module.learned_drivable_extractor._run_every_n_ticks == 10
+    assert module.learned_drivable_extractor._max_input_long_edge_px == 512
+    assert module.learned_lane_extractor is None

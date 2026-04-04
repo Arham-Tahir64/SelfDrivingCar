@@ -32,3 +32,53 @@ evaluation:
     prediction: 15
     planning: 20
     control: 5
+
+tuning:
+  behavior:
+    goal_tolerance_m: 6.0
+    red_light_approach_distance_m: 30.0
+    red_light_stop_distance_m: 12.0
+    lead_agent_merge_distance_m: 18.0
+    merge_cooldown_ticks: 30
+    pedestrian_yield_distance_m: 20.0
+    pedestrian_lateral_threshold_m: 3.5
+    emergency_vehicle_distance_m: 40.0
+
+  planning:
+    horizon_steps: 12
+    dt_s: 0.2
+    cruise_speed_mps: 12.0
+
+  control:
+    stanley_gain: 2.2
+    heading_gain: 1.1
+    kp_speed: 0.32
+    ki_speed: 0.04
+    kd_speed: 0.03
+    emergency_ttc_s: 1.6
+    emergency_gap_m: 6.0
+
+  prediction:
+    horizon_s: 5.0
+    dt_s: 0.1
+    default_lane_speed_mps: 8.0
+    velocity_decay_rate: 0.04
+    sigma_lat_base: 0.3
+    sigma_lat_growth: 0.06
+    sigma_lon_base: 0.5
+    sigma_lon_growth: 0.12
+
+  perception:
+    object_sizes:
+      vehicle: [4.5, 2.0, 1.6]
+      cyclist: [1.8, 0.8, 1.5]
+      pedestrian: [0.8, 0.8, 1.8]
+      traffic_light: [0.6, 0.6, 3.0]
+    fusion_match_distance_m: 5.0
+    lidar:
+      cell_size_m: 0.75
+      min_cluster_points: 3
+      min_range_m: 1.5
+      max_range_m: 60.0
+      min_height_m: 0.35
+      ground_z_threshold_m: -1.5

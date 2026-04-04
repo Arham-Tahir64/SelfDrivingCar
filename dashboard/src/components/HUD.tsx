@@ -199,6 +199,9 @@ export default function HUD() {
               );
             },
           )}
+          {(latency.perception_aux_total ?? 0) > 0 && (
+            <LatencyBar label="P-AUX" ms={latency.perception_aux_total ?? 0} />
+          )}
           <div
             style={{
               marginTop: 4,

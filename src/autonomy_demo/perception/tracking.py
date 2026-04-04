@@ -230,10 +230,10 @@ class KalmanSortTracker:
         self.id_switches = 0
 
     def update(self, detections: list[FrameDetection2D]) -> list[TrackedDetection2D]:
-        # --- 1. Predict all existing tracks ---
-        predicted_bboxes: dict[int, np.ndarray] = {}
-        for tid, track in self._tracks.items():
-            predicted_bboxes[tid] = track.kf.predict()
+        if not detections:
+            return self.predict_only()
+
+        predicted_bboxes = self._predict_all()
 
         # --- 2. Handle preferred_track_id matches first (GT bootstrap) ---
         matched_track_ids: set[int] = set()
@@ -301,6 +301,27 @@ class KalmanSortTracker:
             outputs.append(self._to_output(new_track))
 
         # --- 5. Age unmatched tracks, delete stale ones ---
+        self._age_unmatched_tracks(matched_track_ids)
+
+        return outputs
+
+    def predict_only(self) -> list[TrackedDetection2D]:
+        self._predict_all()
+        self._age_unmatched_tracks(set())
+        outputs: list[TrackedDetection2D] = []
+        for track in self._tracks.values():
+            if track.hits < self.confirm_hits:
+                continue
+            outputs.append(self._to_output(track))
+        return outputs
+
+    def _predict_all(self) -> dict[int, np.ndarray]:
+        predicted_bboxes: dict[int, np.ndarray] = {}
+        for tid, track in self._tracks.items():
+            predicted_bboxes[tid] = track.kf.predict()
+        return predicted_bboxes
+
+    def _age_unmatched_tracks(self, matched_track_ids: set[int]) -> None:
         to_delete: list[int] = []
         for tid, track in self._tracks.items():
             if tid in matched_track_ids:
@@ -311,8 +332,6 @@ class KalmanSortTracker:
                 to_delete.append(tid)
         for tid in to_delete:
             self._tracks.pop(tid, None)
-
-        return outputs
 
     def _to_output(self, track: _KalmanTrack) -> TrackedDetection2D:
         state = TrackState.CONFIRMED if track.hits >= self.confirm_hits else TrackState.TENTATIVE

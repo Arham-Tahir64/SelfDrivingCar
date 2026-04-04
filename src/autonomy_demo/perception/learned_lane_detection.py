@@ -80,7 +80,13 @@ class LearnedLaneExtractor:
     MIN_TRAINING_FRAMES = 200  # frames before switching from heuristic to learned
     TRAINING_INTERVAL = 5  # train every N frames during warmup
 
-    def __init__(self, *, device: str = "cuda") -> None:
+    def __init__(
+        self,
+        *,
+        device: str = "cuda",
+        run_every_n_ticks: int = 1,
+        allow_online_training: bool = True,
+    ) -> None:
         self._device = device if torch.cuda.is_available() else "cpu"
         self._model = _LaneBackbone().to(self._device)
         self._optimizer = torch.optim.Adam(self._model.parameters(), lr=1e-3)
@@ -88,6 +94,10 @@ class LearnedLaneExtractor:
         self._frames_seen = 0
         self._trained = False
         self._last_inference_ms: float = 0.0
+        self._run_every_n_ticks = max(int(run_every_n_ticks), 1)
+        self._allow_online_training = allow_online_training
+        self._tick_counter = 0
+        self._ran_inference_last_call = False
         self._row_anchors: np.ndarray | None = None
         logger.info("LearnedLaneExtractor initialized on %s", self._device)
 
@@ -232,13 +242,18 @@ class LearnedLaneExtractor:
         """
         image = np.asarray(frame, dtype=np.uint8)
         if image.ndim != 3:
+            self._ran_inference_last_call = False
             return None
         image_height, image_width = image.shape[:2]
 
+        self._tick_counter += 1
         self._frames_seen += 1
+        self._ran_inference_last_call = False
 
         # Warmup phase: collect training data from heuristic extractor
         if not self._trained:
+            if not self._allow_online_training:
+                return None
             if heuristic_lanes is not None:
                 self._collect_training_sample(image, heuristic_lanes, image_width, image_height)
 
@@ -261,6 +276,9 @@ class LearnedLaneExtractor:
                     self._frames_seen, len(self._training_buffer),
                 )
             return None  # caller uses heuristic during warmup
+
+        if self._tick_counter % self._run_every_n_ticks != 1:
+            return None
 
         # Inference phase
         t0 = time.perf_counter()
@@ -302,6 +320,7 @@ class LearnedLaneExtractor:
                     position_estimate_kind="learned_lane_detection",
                 )
             )
+        self._ran_inference_last_call = True
         return lanes
 
     @property
@@ -311,3 +330,7 @@ class LearnedLaneExtractor:
     @property
     def is_trained(self) -> bool:
         return self._trained
+
+    @property
+    def ran_inference_last_call(self) -> bool:
+        return self._ran_inference_last_call

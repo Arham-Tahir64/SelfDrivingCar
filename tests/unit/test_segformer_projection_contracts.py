@@ -3,14 +3,15 @@ from __future__ import annotations
 import numpy as np
 
 from autonomy_demo.perception.segformer_drivable import ROAD_CLASS_ID, SegFormerDrivableExtractor
-from autonomy_demo.visualization.service import _is_image_grounded_bbox
+from autonomy_demo.visualization.service import _has_image_bbox, _is_camera_grounded
 
 
 def test_overlay_bbox_guard_accepts_only_camera_projected_boxes() -> None:
     bbox = np.array([10.0, 20.0, 30.0, 40.0], dtype=np.float32)
-    assert _is_image_grounded_bbox(bbox, position_estimate_kind="camera_projection")
-    assert not _is_image_grounded_bbox(bbox, position_estimate_kind="truth_fallback")
-    assert not _is_image_grounded_bbox(None, position_estimate_kind="camera_projection")
+    assert _has_image_bbox(bbox)
+    assert not _has_image_bbox(None)
+    assert _is_camera_grounded("camera_projection")
+    assert not _is_camera_grounded("truth_fallback")
 
 
 def test_segformer_road_mask_keeps_bottom_center_road_and_excludes_sidewalk() -> None:

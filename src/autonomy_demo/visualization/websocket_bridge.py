@@ -30,7 +30,9 @@ _WS_TOPICS = frozenset(
         TopicName.SCENARIO_INFO.value,
         TopicName.VISUALIZATION_CAMERA_OVERLAY.value,
         TopicName.VISUALIZATION_BEV_DRIVABLE.value,
+        TopicName.VISUALIZATION_ROAD_CORRIDOR.value,
         TopicName.VISUALIZATION_WORLD_LAYER.value,
+        TopicName.VISUALIZATION_PRIOR_MAP.value,
         TopicName.SENSOR_LIDAR.value,
         TopicName.PIPELINE_LATENCY.value,
     }
@@ -50,6 +52,7 @@ _RETAINED_TOPICS = frozenset(
         TopicName.SCENARIO_INFO.value,
         TopicName.MAP_LOCAL_MAP.value,
         TopicName.VISUALIZATION_WORLD_LAYER.value,
+        TopicName.VISUALIZATION_PRIOR_MAP.value,
     }
 )
 
@@ -62,6 +65,7 @@ _FAST_DYNAMIC_TOPICS = frozenset(
         TopicName.CONTROL_VEHICLE_COMMAND.value,
         TopicName.PLANNING_EGO_TRAJECTORY.value,
         TopicName.PIPELINE_LATENCY.value,
+        TopicName.VISUALIZATION_ROAD_CORRIDOR.value,
         TopicName.VISUALIZATION_WORLD_LAYER.value,
     }
 )
@@ -80,8 +84,8 @@ _WORLD_LAYER_STATIC_KEYS = ("signature", "roads", "lane_markers", "sidewalks")
 _WORLD_LAYER_DYNAMIC_KEYS = ("traffic_lights",)
 
 _LIDAR_MAX_POINTS = 300
-_JPEG_QUALITY = 35
-_OVERLAY_MAX_WIDTH = 360
+_JPEG_QUALITY = 80
+_OVERLAY_MAX_WIDTH = 960
 _FAST_DYNAMIC_FPS = 8.0
 _HEAVY_DYNAMIC_FPS = 2.0
 _WAYPOINT_STRIDE = 2
@@ -437,12 +441,29 @@ def _serialize_candidates_for_dashboard(candidates: Any) -> list[dict[str, Any]]
         return []
     serialized: list[dict[str, Any]] = []
     for candidate in list(candidates):
+        cost_breakdown = getattr(candidate, "cost_breakdown", None)
         serialized.append(
             {
                 "trajectory": _serialize_ego_trajectory_for_dashboard(getattr(candidate, "trajectory", None)),
                 "lane_id": getattr(candidate, "lane_id", ""),
                 "target_speed_mps": getattr(candidate, "target_speed_mps", 0.0),
                 "score": getattr(candidate, "score", 0.0),
+                "feasible": getattr(candidate, "feasible", True),
+                "reject_reason": getattr(candidate, "reject_reason", None),
+                "reference_lane_id": getattr(candidate, "reference_lane_id", ""),
+                "target_lane_id": getattr(candidate, "target_lane_id", ""),
+                "target_d_m": getattr(candidate, "target_d_m", 0.0),
+                "terminal_time_s": getattr(candidate, "terminal_time_s", 0.0),
+                "cost_breakdown": {
+                    "collision": getattr(cost_breakdown, "collision", 0.0),
+                    "cone_proximity": getattr(cost_breakdown, "cone_proximity", 0.0),
+                    "lane_deviation": getattr(cost_breakdown, "lane_deviation", 0.0),
+                    "jerk": getattr(cost_breakdown, "jerk", 0.0),
+                    "speed_error": getattr(cost_breakdown, "speed_error", 0.0),
+                    "traffic_violation": getattr(cost_breakdown, "traffic_violation", 0.0),
+                    "route_progress": getattr(cost_breakdown, "route_progress", 0.0),
+                    "total": getattr(cost_breakdown, "total", getattr(candidate, "score", 0.0)),
+                },
             }
         )
     return serialize(serialized)
@@ -581,6 +602,14 @@ class WebSocketBridge:
             retained[TopicName.VISUALIZATION_WORLD_LAYER.value] = static_world_layer
         if dynamic_world_layer is not None:
             dynamic[TopicName.VISUALIZATION_WORLD_LAYER.value] = dynamic_world_layer
+
+        prior_map = snapshot.get(TopicName.VISUALIZATION_PRIOR_MAP.value)
+        if prior_map is not None:
+            retained[TopicName.VISUALIZATION_PRIOR_MAP.value] = _serialize_payload(prior_map)
+
+        road_corridor = snapshot.get(TopicName.VISUALIZATION_ROAD_CORRIDOR.value)
+        if road_corridor is not None:
+            dynamic[TopicName.VISUALIZATION_ROAD_CORRIDOR.value] = _serialize_payload(road_corridor)
 
         for topic in (
             TopicName.LOCALIZATION_EGO_POSE.value,
