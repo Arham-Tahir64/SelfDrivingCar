@@ -7,7 +7,7 @@ import torch
 import torch.nn.functional as F
 
 from autonomy_demo.common.logging import get_logger
-from autonomy_demo.interfaces.types import DrivableSpaceMask
+from autonomy_demo.interfaces.types import DrivableSpaceMask, SemanticSegMap
 
 logger = get_logger(__name__)
 
@@ -45,6 +45,7 @@ class SegFormerDrivableExtractor:
         )
         self._tick_counter: int = 0
         self._cached_result: DrivableSpaceMask | None = None
+        self._cached_seg_map: SemanticSegMap | None = None
         self._ran_inference_last_call = False
 
     def _ensure_loaded(self) -> bool:
@@ -136,6 +137,10 @@ class SegFormerDrivableExtractor:
             source_sensor_id=sensor_id,
         )
         self._cached_result = result
+        self._cached_seg_map = SemanticSegMap(
+            label_map=pred_classes.astype(np.uint8),
+            source_sensor_id=sensor_id,
+        )
         self._ran_inference_last_call = True
         return result
 
@@ -228,3 +233,7 @@ class SegFormerDrivableExtractor:
     @property
     def ran_inference_last_call(self) -> bool:
         return self._ran_inference_last_call
+
+    @property
+    def last_seg_map(self) -> SemanticSegMap | None:
+        return self._cached_seg_map

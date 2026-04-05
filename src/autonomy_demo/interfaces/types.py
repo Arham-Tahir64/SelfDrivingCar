@@ -197,6 +197,19 @@ class DrivableSpaceMask:
 
 
 @dataclass(slots=True)
+class SemanticSegMap:
+    """Full semantic segmentation label map (e.g. Cityscapes 19-class)."""
+
+    label_map: NDArray[np.uint8]
+    source_sensor_id: str
+
+    def __post_init__(self) -> None:
+        self.label_map = np.asarray(self.label_map, dtype=np.uint8)
+        if self.label_map.ndim != 2:
+            raise ValueError("label_map must be HxW")
+
+
+@dataclass(slots=True)
 class EgoPose:
     world_xyz: FloatArray
     yaw_rad: float

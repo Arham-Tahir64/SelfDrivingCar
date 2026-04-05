@@ -204,6 +204,11 @@ class PipelineRuntime:
                 self.context.event_bus.publish(TopicName.PERCEPTION_DETECTIONS.value, detections)
                 self.context.event_bus.publish(TopicName.PERCEPTION_LANES.value, lanes)
                 self.context.event_bus.publish(TopicName.PERCEPTION_DRIVABLE_SPACE.value, drivable_space)
+                seg_map_data = bundle.metadata.get("semantic_seg_map")
+                if seg_map_data:
+                    front_seg = seg_map_data.get(bundle.front_camera.sensor_id)
+                    if front_seg is not None:
+                        self.context.event_bus.publish(TopicName.PERCEPTION_SEMANTIC_SEG.value, front_seg)
                 self.context.event_bus.publish(TopicName.PERCEPTION_TRAFFIC_LIGHTS.value, traffic_lights)
                 if "perception_summary" in bundle.metadata:
                     self.context.event_bus.publish(

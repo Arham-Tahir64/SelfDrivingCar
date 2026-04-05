@@ -486,6 +486,12 @@ class _CameraSceneContextMixin:
                 bundle.metadata["drivable_source"] = "segformer"
                 if getattr(learned_drivable_extractor, "ran_inference_last_call", False):
                     bundle.metadata["drivable_inference_ms"] = learned_drivable_extractor.last_inference_ms
+                # Expose full semantic segmentation map for visualization
+                seg_map = getattr(learned_drivable_extractor, "last_seg_map", None)
+                if seg_map is not None:
+                    bundle.metadata["semantic_seg_map"] = {
+                        bundle.front_camera.sensor_id: seg_map,
+                    }
         if drivable_space is None:
             drivable_space = drivable_extractor.extract(
                 bundle.front_camera.frame,

@@ -87,6 +87,7 @@ class PygameCameraGridVisualizationService:
         tile_height = self._top_grid_height // 2
         detections_by_sensor = bundle.metadata.get("perception_camera_detections", {}) or {}
         capture_metadata = bundle.metadata.get("camera_capture", {}) or {}
+        seg_maps = bundle.metadata.get("semantic_seg_map", {}) or {}
 
         for index, (sensor_id, label) in enumerate(self._camera_order):
             camera = getattr(bundle, sensor_id, None)
@@ -101,6 +102,7 @@ class PygameCameraGridVisualizationService:
                 title=label,
                 detections=detections_by_sensor.get(sensor_id, []),
                 capture=capture_metadata.get(sensor_id, {}),
+                seg_map=seg_maps.get(sensor_id),
             )
 
         lidar_rect = pygame.Rect(0, self._top_grid_height, self._window_size[0], self._lidar_strip_height)
@@ -130,6 +132,7 @@ class PygameCameraGridVisualizationService:
         title: str,
         detections: list[dict[str, Any]],
         capture: dict[str, Any],
+        seg_map=None,
     ) -> None:
         pygame = self._pygame
         screen = self._screen
@@ -155,6 +158,9 @@ class PygameCameraGridVisualizationService:
         scaled = pygame.transform.smoothscale(surface, (content_rect.width, content_rect.height))
         screen.blit(scaled, content_rect.topleft)
 
+        # Semantic segmentation overlay
+        present_class_ids = self._draw_seg_overlay(screen, pygame, content_rect, seg_map)
+
         source_width = max(int(image.shape[1]), 1)
         source_height = max(int(image.shape[0]), 1)
         scale_x = content_rect.width / source_width
@@ -173,10 +179,75 @@ class PygameCameraGridVisualizationService:
             label_surface = font.render(label, True, color)
             screen.blit(label_surface, (x1, max(content_rect.y, y1 - 20)))
 
+        # Segmentation legend (dynamic — only classes present in this frame)
+        if present_class_ids is not None:
+            self._draw_seg_legend(screen, pygame, font, content_rect, present_class_ids)
+
         status_text = str(capture.get("status", getattr(camera.status, "value", "OK")))
         meta_text = f"{status_text} | det:{len(detections)}"
         screen.blit(title_font.render(title, True, (236, 240, 247)), (tile_rect.x + 14, tile_rect.y + 10))
         screen.blit(font.render(meta_text, True, (147, 160, 184)), (tile_rect.x + 110, tile_rect.y + 14))
+
+    def _draw_seg_overlay(self, screen, pygame, content_rect, seg_map) -> list[int] | None:
+        """Blend colorized semantic segmentation onto the camera tile. Returns present class IDs."""
+        if seg_map is None:
+            return None
+        try:
+            from autonomy_demo.perception.cityscapes_palette import CITYSCAPES_PALETTE
+
+            label_map = np.asarray(seg_map.label_map, dtype=np.uint8)
+            color_map = CITYSCAPES_PALETTE[label_map]  # (H, W, 3) uint8
+
+            # Build a semi-transparent overlay surface
+            overlay_surface = pygame.surfarray.make_surface(np.transpose(color_map, (1, 0, 2)))
+            overlay_surface = pygame.transform.smoothscale(
+                overlay_surface, (content_rect.width, content_rect.height)
+            )
+            overlay_surface.set_alpha(120)
+            screen.blit(overlay_surface, content_rect.topleft)
+
+            present_ids = sorted(set(np.unique(label_map).tolist()))
+            return present_ids
+        except Exception:
+            return None
+
+    def _draw_seg_legend(self, screen, pygame, font, content_rect, present_class_ids: list[int]) -> None:
+        """Draw a compact legend strip at the bottom of the camera tile for visible classes."""
+        try:
+            from autonomy_demo.perception.cityscapes_palette import (
+                CITYSCAPES_LABELS,
+                CITYSCAPES_PALETTE,
+            )
+
+            legend_x = content_rect.x + 4
+            legend_y = content_rect.bottom - 18
+            swatch_size = 10
+            padding = 6
+
+            # Semi-transparent background bar
+            bar_surface = pygame.Surface((content_rect.width, 20), pygame.SRCALPHA)
+            bar_surface.fill((0, 0, 0, 160))
+            screen.blit(bar_surface, (content_rect.x, legend_y - 2))
+
+            for class_id in present_class_ids:
+                if class_id >= len(CITYSCAPES_LABELS):
+                    continue
+                color = tuple(int(c) for c in CITYSCAPES_PALETTE[class_id])
+                label_text = CITYSCAPES_LABELS[class_id]
+                text_surface = font.render(label_text, True, (220, 225, 235))
+                entry_width = swatch_size + 3 + text_surface.get_width() + padding
+
+                # Stop if we'd overflow the tile width
+                if legend_x + entry_width > content_rect.right - 4:
+                    break
+
+                pygame.draw.rect(
+                    screen, color, pygame.Rect(legend_x, legend_y, swatch_size, swatch_size)
+                )
+                screen.blit(text_surface, (legend_x + swatch_size + 3, legend_y - 3))
+                legend_x += entry_width
+        except Exception:
+            pass
 
     def _draw_lidar_strip(
         self,

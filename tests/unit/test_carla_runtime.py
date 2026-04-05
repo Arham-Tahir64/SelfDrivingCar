@@ -289,6 +289,9 @@ def test_npc_motion_plan_accelerates_toward_route_target() -> None:
 def test_npc_target_speed_defaults_by_behavior() -> None:
     assert CarlaSimulationBackend._npc_target_speed_mps("cross_traffic") == pytest.approx(6.0)
     assert CarlaSimulationBackend._npc_target_speed_mps("parked") == pytest.approx(0.0)
+    assert CarlaSimulationBackend._npc_target_speed_mps("highway_flow_fast") == pytest.approx(11.0)
+    assert CarlaSimulationBackend._npc_target_speed_mps("highway_flow_aggressive") == pytest.approx(13.0)
+    assert CarlaSimulationBackend._npc_target_speed_mps("highway_flow_speed_12.5") == pytest.approx(12.5)
     assert CarlaSimulationBackend._npc_target_speed_mps("default") == pytest.approx(8.0)
 
 
