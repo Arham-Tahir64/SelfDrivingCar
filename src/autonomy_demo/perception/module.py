@@ -121,7 +121,7 @@ def _resolve_perception_aux_policy(runtime_config) -> _PerceptionAuxPolicy:
                 allow_online_lane_training=False,
                 segformer_run_every_n_ticks=5,
                 lane_run_every_n_ticks=5,
-                depth_run_every_n_ticks=5,
+                depth_run_every_n_ticks=3,
                 segformer_max_input_long_edge_px=768,
             )
         else:
@@ -146,7 +146,7 @@ def _resolve_perception_aux_policy(runtime_config) -> _PerceptionAuxPolicy:
             allow_online_lane_training=True,
             segformer_run_every_n_ticks=5,
             lane_run_every_n_ticks=1,
-            depth_run_every_n_ticks=5,
+            depth_run_every_n_ticks=3,
             segformer_max_input_long_edge_px=None,
         )
 
