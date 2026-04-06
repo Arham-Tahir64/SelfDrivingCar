@@ -64,3 +64,12 @@ class CameraSegmentationResult:
     source_sensor_id: str
     model_name: str
     model_version: str
+    source_frame_id: int | None = None
+    source_tick_id: int | None = None
+    source_sim_time_s: float | None = None
+    source_ego_world_xyz: FloatArray | None = None
+    source_ego_yaw_rad: float = 0.0
+    camera_calibration: dict[str, object] | None = None
+    reprojected: bool = False
+    warped_from_frame_id: int | None = None
+    warped_from_tick_id: int | None = None

@@ -522,10 +522,19 @@ class _CameraSceneContextMixin:
 
         # --- Drivable space: try learned model first, fall back to heuristic ---
         drivable_space = None
+        camera_calibration = (
+            (bundle.metadata.get("camera_calibration", {}) or {}).get(bundle.front_camera.sensor_id)
+        )
         if learned_drivable_extractor is not None:
             drivable_space = learned_drivable_extractor.extract(
                 bundle.front_camera.frame,
                 bundle.front_camera.sensor_id,
+                frame_id=bundle.front_camera.frame_id,
+                tick_id=bundle.tick_id,
+                sim_time_s=bundle.sim_time_s,
+                ego_world_xyz=ego_xyz,
+                ego_yaw_rad=ego_yaw,
+                camera_calibration=camera_calibration,
             )
             if drivable_space is not None:
                 bundle.metadata["drivable_source"] = "segformer"
@@ -539,15 +548,33 @@ class _CameraSceneContextMixin:
                     }
                 segmentation_result = getattr(learned_drivable_extractor, "last_segmentation_result", None)
                 if segmentation_result is not None:
-                    bundle.metadata["segmentation_source"] = "student"
+                    bundle.metadata["segmentation_source"] = (
+                        "student_reprojected" if getattr(segmentation_result, "reprojected", False) else "student"
+                    )
                     bundle.metadata["segmentation_model_name"] = segmentation_result.model_name
                     bundle.metadata["segmentation_model_version"] = segmentation_result.model_version
+                    bundle.metadata["segmentation_source_tick_id"] = segmentation_result.source_tick_id
+                    bundle.metadata["segmentation_warped_from_tick_id"] = segmentation_result.warped_from_tick_id
                     bundle.metadata["segmentation_uncertainty_mean"] = float(
                         np.mean(segmentation_result.uncertainty)
                     )
                     bundle.metadata["segmentation_uncertainty_p95"] = float(
                         np.percentile(segmentation_result.uncertainty, 95)
                     )
+                    if (
+                        segmentation_result.warped_from_tick_id is not None
+                        and segmentation_result.source_tick_id is not None
+                    ):
+                        bundle.metadata["segmentation_reprojection_age_ticks"] = max(
+                            int(segmentation_result.source_tick_id) - int(segmentation_result.warped_from_tick_id),
+                            0,
+                        )
+                    elif (
+                        segmentation_result.source_sim_time_s is not None
+                        and segmentation_result.warped_from_tick_id is not None
+                        and bundle.sim_time_s is not None
+                    ):
+                        bundle.metadata["segmentation_reprojection_age_ticks"] = 0
                     if bundle.semantic_camera is not None:
                         gt_labels = semantic_camera_rgb_to_label_map(bundle.semantic_camera.frame)
                         gt_task_labels = remap_carla_semantic_to_task(gt_labels)

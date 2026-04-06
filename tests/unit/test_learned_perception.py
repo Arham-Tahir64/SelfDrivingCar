@@ -6,6 +6,7 @@ import torch
 
 from autonomy_demo.interfaces.enums import LaneLineType
 from autonomy_demo.interfaces.types import DrivableSpaceMask, LaneLine
+from autonomy_demo.perception.internal_types import CameraSegmentationResult
 
 
 # ---------- SegFormer drivable space tests ----------
@@ -132,6 +133,68 @@ def test_segformer_extractor_emits_structured_segmentation_result() -> None:
     assert segmentation.task_label_map.shape == (128, 256)
     assert segmentation.task_probabilities.shape == (128, 256, 7)
     assert segmentation.model_name.endswith("cityscapes-1024-1024")
+
+
+def test_segformer_extractor_reprojects_cached_segmentation_on_skipped_ticks() -> None:
+    from autonomy_demo.perception.segformer_drivable import SegFormerDrivableExtractor
+
+    extractor = SegFormerDrivableExtractor(device="cpu", run_every_n_ticks=2)
+    task_probabilities = np.zeros((80, 120, 7), dtype=np.float32)
+    task_probabilities[..., 0] = 0.9
+    task_probabilities[42:78, 38:84, 0] = 0.05
+    task_probabilities[42:78, 38:84, 1] = 0.95
+    initial = CameraSegmentationResult(
+        semantic_label_map=np.zeros((80, 120), dtype=np.uint8),
+        task_label_map=np.argmax(task_probabilities, axis=-1).astype(np.uint8),
+        task_probabilities=task_probabilities,
+        drivable_prob=task_probabilities[..., 1].copy(),
+        lane_boundary_prob=np.zeros((80, 120), dtype=np.float32),
+        curb_boundary_prob=np.zeros((80, 120), dtype=np.float32),
+        uncertainty=np.zeros((80, 120), dtype=np.float32),
+        source_sensor_id="front_camera",
+        model_name="test-model",
+        model_version="test-model",
+        source_frame_id=1,
+        source_tick_id=1,
+        source_sim_time_s=0.0,
+        source_ego_world_xyz=np.array([0.0, 0.0, 0.0], dtype=np.float32),
+        source_ego_yaw_rad=0.0,
+        camera_calibration={
+            "fov_deg": 90.0,
+            "mount_xyz": [2.3, 0.0, 0.8],
+            "mount_rpy_deg": [0.0, 0.0, 0.0],
+            "image_width": 120,
+            "image_height": 80,
+        },
+    )
+    first = extractor._store_display_result(initial)
+    extractor._latest_inference_segmentation_result = initial
+    extractor._tick_counter = 1
+
+    second = extractor.extract(
+        np.zeros((80, 120, 3), dtype=np.uint8),
+        "front_camera",
+        frame_id=2,
+        tick_id=2,
+        sim_time_s=0.1,
+        ego_world_xyz=np.array([0.6, 0.0, 0.0], dtype=np.float32),
+        ego_yaw_rad=0.12,
+        camera_calibration={
+            "fov_deg": 90.0,
+            "mount_xyz": [2.3, 0.0, 0.8],
+            "mount_rpy_deg": [0.0, 0.0, 0.0],
+            "image_width": 120,
+            "image_height": 80,
+        },
+    )
+
+    assert second is not None
+    assert extractor.ran_inference_last_call is False
+    assert extractor.last_segmentation_result is not None
+    assert extractor.last_segmentation_result.reprojected is True
+    assert extractor.last_segmentation_result.warped_from_tick_id == 1
+    assert extractor.last_segmentation_result.source_tick_id == 2
+    assert not np.array_equal(first.mask, second.mask)
 
 
 # ---------- Learned lane detector tests ----------
