@@ -23,6 +23,7 @@ class FrameDetection2D:
     world_bbox_3d: FloatArray | None = None
     velocity_xyz: FloatArray | None = None
     world_xyz: FloatArray | None = None
+    position_uncertainty_m: float = 0.0
     preferred_track_id: int | None = None
     traffic_light_state: TrafficLightState | None = None
 

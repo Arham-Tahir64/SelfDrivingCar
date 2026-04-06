@@ -114,6 +114,7 @@ class ObjectDetection:
     source_modality: str = "bootstrap"
     source_sensor_ids: list[str] = field(default_factory=list)
     position_estimate_kind: str = "truth_fallback"
+    position_uncertainty_m: float = 0.0
     gt_actor_id: int | None = None  # CARLA actor ID for MOT evaluation
 
     def __post_init__(self) -> None:

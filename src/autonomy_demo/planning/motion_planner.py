@@ -967,10 +967,12 @@ class FrenetMotionPlanner:
         safety_by_track: dict[int, float] = {}
         ego_radius = self._ego_radius_m()
         for track_id, detection in detections_by_track.items():
+            position_uncertainty = getattr(detection, "position_uncertainty_m", 0.0)
             safety_by_track[track_id] = (
                 ego_radius
                 + self._agent_radius_m(np.asarray(detection.world_bbox_3d, dtype=np.float32))
                 + _BASE_SAFETY_BUFFER_M
+                + position_uncertainty
             )
         for prediction in predictions:
             covariance_padding = 0.0

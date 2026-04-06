@@ -601,16 +601,17 @@ def test_fuse_detections_prefers_lidar_geometry_and_camera_semantics_when_matche
         confidence=0.7,
         source_modality="lidar",
     )
-    fused = fuse_detections([camera_detection], [lidar_detection])
+    fused, used_lidar = fuse_detections([camera_detection], [lidar_detection])
     assert len(fused) == 1
     assert fused[0].source_modality == "fused"
     assert fused[0].track_id == 20
     assert fused[0].object_class == ObjectClass.PEDESTRIAN
     assert fused[0].position_estimate_kind == "fusion"
     assert fused[0].source_sensor_ids == ["front_camera", "lidar"]
+    assert 0 in used_lidar
 
 
-def test_fuse_detections_drops_unmatched_lidar_only_and_camera_only_objects() -> None:
+def test_fuse_detections_returns_no_fused_when_unmatched() -> None:
     camera_detection = _object_detection(
         track_id=1,
         object_class=ObjectClass.VEHICLE,
@@ -627,8 +628,9 @@ def test_fuse_detections_drops_unmatched_lidar_only_and_camera_only_objects() ->
         confidence=0.8,
         source_modality="lidar",
     )
-    fused = fuse_detections([camera_detection], [lidar_detection], match_distance_m=3.0)
+    fused, used_lidar = fuse_detections([camera_detection], [lidar_detection], match_distance_m=3.0)
     assert fused == []
+    assert used_lidar == set()
 
 
 def test_fuse_detections_drops_conflicting_unmatched_classes() -> None:
@@ -648,8 +650,9 @@ def test_fuse_detections_drops_conflicting_unmatched_classes() -> None:
         confidence=0.8,
         source_modality="lidar",
     )
-    fused = fuse_detections([camera_detection], [lidar_detection], match_distance_m=2.0)
+    fused, used_lidar = fuse_detections([camera_detection], [lidar_detection], match_distance_m=2.0)
     assert fused == []
+    assert used_lidar == set()
 
 
 def test_fused_perception_stack_publishes_camera_only_detections_when_no_fused_match() -> None:
@@ -681,9 +684,10 @@ def test_fused_perception_stack_publishes_camera_only_detections_when_no_fused_m
 
     detections, _, _, traffic_lights, _ = module.run(_bundle())
 
-    assert len(detections) == 1
-    assert detections[0].source_modality == "camera"
-    assert detections[0].track_id == 31
+    assert len(detections) == 2
+    track_ids = {d.track_id for d in detections}
+    assert 31 in track_ids  # unmatched camera detection recovered
+    assert 41 in track_ids  # unmatched lidar detection recovered
     assert traffic_lights == []
 
 

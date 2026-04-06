@@ -1104,6 +1104,7 @@ class PerceptionStack(_CameraSceneContextMixin):
                     source_modality=detection.source_modality,
                     source_sensor_ids=list(detection.source_sensor_ids or [detection.source_sensor_id]),
                     position_estimate_kind=detection.position_estimate_kind,
+                    position_uncertainty_m=getattr(detection, "position_uncertainty_m", 0.0),
                     gt_actor_id=detection.preferred_track_id,
                 )
             )
@@ -1246,9 +1247,14 @@ class FusedPerceptionStack(_CameraSceneContextMixin):
             camera_detections, traffic_lights, camera_fallback_state, active_camera_sensors, camera_detection_debug = (
                 self.camera_stack.detect_dynamic(bundle)
             )
+            if camera_fallback_state == "bootstrap":
+                bundle.metadata["perception_bootstrap_active"] = True
+                self.logger.warning("Perception using bootstrap (ground-truth) camera detections for tick %s", bundle.tick_id)
             lidar_detections = self.lidar_stack.detect_dynamic(bundle)
-            fused_objects = fuse_detections(camera_detections, lidar_detections)
-            canonical_objects = self._canonical_detections(camera_detections, fused_objects)
+            fused_objects, used_lidar_indices = fuse_detections(camera_detections, lidar_detections)
+            canonical_objects = self._canonical_detections(
+                camera_detections, fused_objects, lidar_detections, used_lidar_indices
+            )
             lanes, drivable_space = self._scene_context(
                 bundle,
                 lane_extractor=self.lane_extractor,
@@ -1294,17 +1300,25 @@ class FusedPerceptionStack(_CameraSceneContextMixin):
         self,
         camera_detections: list[ObjectDetection],
         fused_detections: list[ObjectDetection],
+        lidar_detections: list[ObjectDetection] | None = None,
+        used_lidar_indices: set[int] | None = None,
     ) -> list[ObjectDetection]:
         actual_camera_detections = [
             detection for detection in camera_detections if str(detection.source_modality) == "camera"
         ]
         if not fused_detections:
-            return actual_camera_detections
-        canonical = list(fused_detections)
-        for detection in actual_camera_detections:
-            if any(self._camera_detection_is_represented(detection, fused) for fused in fused_detections):
-                continue
-            canonical.append(detection)
+            canonical = list(actual_camera_detections)
+        else:
+            canonical = list(fused_detections)
+            for detection in actual_camera_detections:
+                if any(self._camera_detection_is_represented(detection, fused) for fused in fused_detections):
+                    continue
+                canonical.append(detection)
+        # Recover unmatched LiDAR detections that were not fused with any camera detection.
+        if lidar_detections and used_lidar_indices is not None:
+            for idx, detection in enumerate(lidar_detections):
+                if idx not in used_lidar_indices:
+                    canonical.append(detection)
         return canonical
 
     def _camera_detection_is_represented(

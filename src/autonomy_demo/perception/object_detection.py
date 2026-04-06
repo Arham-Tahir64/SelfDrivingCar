@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from time import perf_counter
 from typing import Any, Sequence
 
 import numpy as np
+
+_logger = logging.getLogger(__name__)
 
 from autonomy_demo.interfaces.enums import ObjectClass, TrafficLightState
 from autonomy_demo.perception.internal_types import FrameDetection2D
@@ -75,7 +78,7 @@ def _pseudo_world_box(
     sensor_id: str,
     ego_world_xyz: np.ndarray,
     ego_yaw_rad: float,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
     image_height, image_width = image_shape[:2]
     bbox_width = max(float(bbox_xyxy[2] - bbox_xyxy[0]), 1.0)
     bbox_height = max(float(bbox_xyxy[3] - bbox_xyxy[1]), 1.0)
@@ -89,6 +92,8 @@ def _pseudo_world_box(
         forward_scale = 650.0
         lateral_scale = 0.35
     forward_distance = float(np.clip(forward_scale / bbox_height, 3.0, 45.0))
+    # Monocular depth is inherently noisy — uncertainty scales with estimated distance.
+    position_uncertainty_m = forward_distance * 0.3
     lateral_offset = float(normalized_x * forward_distance * lateral_scale)
     size_map = {
         ObjectClass.VEHICLE: (4.5, 2.0, 1.6),
@@ -133,7 +138,7 @@ def _pseudo_world_box(
         dtype=np.float32,
     )
     world_velocity = _rotate_xy(_rotate_xy(sensor_velocity, sensor_yaw_rad), ego_yaw_rad)
-    return world_bbox, world_velocity, world_center.astype(np.float32)
+    return world_bbox, world_velocity, world_center.astype(np.float32), position_uncertainty_m
 
 
 @dataclass(slots=True)
@@ -235,14 +240,17 @@ class YoloObjectDetector:
         if not requests:
             return detections_by_sensor, detector_modes
         if self._uses_explicit_bootstrap():
+            _logger.warning("Camera detector using bootstrap (ground-truth) mode: explicit config")
             return self._bootstrap_batch(requests)
         if self._model is None and self._load_error is None:
             try:
                 self._model = self._load_model()
             except Exception as exc:  # pragma: no cover - depends on optional runtime deps
                 self._load_error = str(exc)
+                _logger.warning("Camera detector falling back to bootstrap: model load failed (%s)", exc)
                 return self._bootstrap_batch(requests)
         if self._model is None:
+            _logger.warning("Camera detector falling back to bootstrap: no model available (prior load error: %s)", self._load_error)
             return self._bootstrap_batch(requests)
 
         prepared_requests: list[tuple[CameraInferenceRequest, np.ndarray, np.ndarray]] = []
@@ -261,13 +269,12 @@ class YoloObjectDetector:
             )
             self.last_inference_ms_total = max(0.0, (perf_counter() - start) * 1000.0)
         except (RuntimeError, ValueError, OSError) as exc:  # pragma: no cover - depends on optional runtime deps
-            import logging
-
-            logging.getLogger(__name__).warning("YOLO batch predict failed: %s", exc)
+            _logger.warning("Camera detector falling back to bootstrap: YOLO predict failed (%s)", exc)
             return self._bootstrap_batch(requests)
 
         normalized_results = self._normalize_results(results)
         if len(normalized_results) != len(prepared_requests):
+            _logger.warning("Camera detector falling back to bootstrap: result count mismatch (%d vs %d)", len(normalized_results), len(prepared_requests))
             return self._bootstrap_batch(requests)
 
         inference_share = self.last_inference_ms_total / float(max(len(prepared_requests), 1))
@@ -337,7 +344,7 @@ class YoloObjectDetector:
             bbox_area = max(0.0, float(bbox_xyxy[2] - bbox_xyxy[0])) * max(0.0, float(bbox_xyxy[3] - bbox_xyxy[1]))
             if bbox_area < request.min_bbox_area_px:
                 continue
-            world_bbox, velocity_xyz, world_xyz = _pseudo_world_box(
+            world_bbox, velocity_xyz, world_xyz, uncertainty_m = _pseudo_world_box(
                 bbox_xyxy,
                 object_class,
                 request.frame.shape,
@@ -357,6 +364,7 @@ class YoloObjectDetector:
                     world_bbox_3d=world_bbox,
                     velocity_xyz=velocity_xyz,
                     world_xyz=world_xyz,
+                    position_uncertainty_m=uncertainty_m,
                     traffic_light_state=_traffic_light_state_from_label(label),
                 )
             )
