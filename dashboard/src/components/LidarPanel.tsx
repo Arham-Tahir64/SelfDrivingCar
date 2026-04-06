@@ -8,7 +8,7 @@ const CANVAS_W = 400;
 const CANVAS_H = 300;
 const RANGE_M = 50;
 const EGO_Y = CANVAS_H * 0.76;
-const POINT_RADIUS = 1.0;
+const POINT_RADIUS = 1.4;
 
 function toCanvas(forwardM: number, lateralM: number): [number, number] {
   const x = CANVAS_W / 2 + (lateralM / RANGE_M) * (CANVAS_W / 2);
@@ -166,7 +166,7 @@ export default function LidarPanel() {
         const z = point[2] ?? 0;
         if (forwardM < -8 || forwardM > RANGE_M || Math.abs(lateralM) > RANGE_M) continue;
         const [x, y] = toCanvas(forwardM, lateralM);
-        const alpha = Math.max(0.18, Math.min(0.42, 0.24 + ((z + 1.0) * 0.03)));
+        const alpha = Math.max(0.26, Math.min(0.58, 0.32 + ((z + 1.0) * 0.04)));
         ctx.fillStyle = `rgba(95, 183, 255, ${alpha})`;
         ctx.beginPath();
         ctx.arc(x, y, POINT_RADIUS, 0, Math.PI * 2);
