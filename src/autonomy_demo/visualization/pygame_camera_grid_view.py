@@ -88,6 +88,7 @@ class PygameCameraGridVisualizationService:
         detections_by_sensor = bundle.metadata.get("perception_camera_detections", {}) or {}
         capture_metadata = bundle.metadata.get("camera_capture", {}) or {}
         seg_maps = bundle.metadata.get("semantic_seg_map", {}) or {}
+        depth_maps = bundle.metadata.get("depth_map", {}) or {}
 
         for index, (sensor_id, label) in enumerate(self._camera_order):
             camera = getattr(bundle, sensor_id, None)
@@ -103,6 +104,7 @@ class PygameCameraGridVisualizationService:
                 detections=detections_by_sensor.get(sensor_id, []),
                 capture=capture_metadata.get(sensor_id, {}),
                 seg_map=seg_maps.get(sensor_id),
+                depth_map=depth_maps.get(sensor_id),
             )
 
         lidar_rect = pygame.Rect(0, self._top_grid_height, self._window_size[0], self._lidar_strip_height)
@@ -133,6 +135,7 @@ class PygameCameraGridVisualizationService:
         detections: list[dict[str, Any]],
         capture: dict[str, Any],
         seg_map=None,
+        depth_map=None,
     ) -> None:
         pygame = self._pygame
         screen = self._screen
@@ -182,6 +185,9 @@ class PygameCameraGridVisualizationService:
         # Segmentation legend (dynamic — only classes present in this frame)
         if present_class_ids is not None:
             self._draw_seg_legend(screen, pygame, font, content_rect, present_class_ids)
+
+        # Depth inset (top-right of content area)
+        self._draw_depth_inset(screen, pygame, font, content_rect, depth_map)
 
         status_text = str(capture.get("status", getattr(camera.status, "value", "OK")))
         meta_text = f"{status_text} | det:{len(detections)}"
@@ -246,6 +252,47 @@ class PygameCameraGridVisualizationService:
                 )
                 screen.blit(text_surface, (legend_x + swatch_size + 3, legend_y - 3))
                 legend_x += entry_width
+        except Exception:
+            pass
+
+    def _draw_depth_inset(self, screen, pygame, font, content_rect, depth_map) -> None:
+        """Draw a Turbo-colorized depth thumbnail in the top-right of the camera tile."""
+        if depth_map is None:
+            return
+        try:
+            depth = np.asarray(depth_map.depth, dtype=np.float32)
+            # Apply a simple Turbo-like colormap using numpy (avoids cv2 dependency here)
+            depth_u8 = np.clip(depth * 255, 0, 255).astype(np.uint8)
+            # Use a fast red-blue gradient: close=warm, far=cool
+            r = depth_u8
+            g = np.clip((128 - np.abs(depth_u8.astype(np.int16) - 128)) * 2, 0, 255).astype(np.uint8)
+            b = 255 - depth_u8
+            color_map = np.stack([r, g, b], axis=-1)  # (H, W, 3)
+
+            # Inset size: 25% of content area
+            inset_w = content_rect.width // 4
+            inset_h = content_rect.height // 4
+            inset_x = content_rect.right - inset_w - 6
+            inset_y = content_rect.y + 6
+
+            inset_surface = pygame.surfarray.make_surface(np.transpose(color_map, (1, 0, 2)))
+            inset_scaled = pygame.transform.smoothscale(inset_surface, (inset_w, inset_h))
+
+            # Dark background for contrast
+            bg = pygame.Surface((inset_w + 4, inset_h + 18), pygame.SRCALPHA)
+            bg.fill((0, 0, 0, 180))
+            screen.blit(bg, (inset_x - 2, inset_y - 2))
+            screen.blit(inset_scaled, (inset_x, inset_y))
+
+            # Border
+            pygame.draw.rect(
+                screen, (255, 255, 255),
+                pygame.Rect(inset_x - 1, inset_y - 1, inset_w + 2, inset_h + 2),
+                width=1,
+            )
+            # Label
+            label = font.render("DEPTH", True, (220, 225, 235))
+            screen.blit(label, (inset_x + 2, inset_y + inset_h + 2))
         except Exception:
             pass
 

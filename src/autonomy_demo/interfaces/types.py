@@ -210,6 +210,19 @@ class SemanticSegMap:
 
 
 @dataclass(slots=True)
+class DepthMap:
+    """Monocular depth estimate (relative inverse depth, higher = closer)."""
+
+    depth: FloatArray
+    source_sensor_id: str
+
+    def __post_init__(self) -> None:
+        self.depth = _float_array(self.depth)
+        if self.depth.ndim != 2:
+            raise ValueError("depth must be HxW")
+
+
+@dataclass(slots=True)
 class EgoPose:
     world_xyz: FloatArray
     yaw_rad: float

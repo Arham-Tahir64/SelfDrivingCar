@@ -36,6 +36,7 @@ _TOP_LEVEL_LATENCY_KEYS = (
 _AUXILIARY_LATENCY_KEYS = (
     "segformer_drivable",
     "learned_lanes",
+    "depth_estimation",
 )
 
 
@@ -209,6 +210,11 @@ class PipelineRuntime:
                     front_seg = seg_map_data.get(bundle.front_camera.sensor_id)
                     if front_seg is not None:
                         self.context.event_bus.publish(TopicName.PERCEPTION_SEMANTIC_SEG.value, front_seg)
+                depth_map_data = bundle.metadata.get("depth_map")
+                if depth_map_data:
+                    front_depth = depth_map_data.get(bundle.front_camera.sensor_id)
+                    if front_depth is not None:
+                        self.context.event_bus.publish(TopicName.PERCEPTION_DEPTH.value, front_depth)
                 self.context.event_bus.publish(TopicName.PERCEPTION_TRAFFIC_LIGHTS.value, traffic_lights)
                 if "perception_summary" in bundle.metadata:
                     self.context.event_bus.publish(

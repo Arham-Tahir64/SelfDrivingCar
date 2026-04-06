@@ -283,6 +283,7 @@ export interface PipelineFrame {
   "system/scenario_info"?: ScenarioInfo;
   "planning/candidates"?: PlannerCandidate[];
   "visualization/camera_overlay"?: string;
+  "perception/depth"?: string;
   "visualization/lidar_preview"?: LidarPreview;
   "visualization/bev_drivable"?: BEVDrivableGrid;
   "visualization/road_corridor"?: RoadCorridorPayload;

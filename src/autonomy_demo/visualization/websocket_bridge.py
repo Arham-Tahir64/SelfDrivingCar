@@ -35,6 +35,7 @@ _WS_TOPICS = frozenset(
         TopicName.VISUALIZATION_PRIOR_MAP.value,
         TopicName.SENSOR_LIDAR.value,
         TopicName.PIPELINE_LATENCY.value,
+        TopicName.PERCEPTION_DEPTH.value,
     }
 )
 
@@ -77,6 +78,7 @@ _HEAVY_DYNAMIC_TOPICS = frozenset(
         TopicName.VISUALIZATION_BEV_DRIVABLE.value,
         TopicName.PREDICTION_AGENTS.value,
         TopicName.PLANNING_CANDIDATES.value,
+        TopicName.PERCEPTION_DEPTH.value,
     }
 )
 
@@ -142,6 +144,30 @@ def _encode_overlay_jpeg(frame_rgb: np.ndarray) -> str | None:
             interpolation=cv2.INTER_AREA,
         )
     success, buf = cv2.imencode(".jpg", frame_rgb[:, :, ::-1], [cv2.IMWRITE_JPEG_QUALITY, _JPEG_QUALITY])
+    if not success:
+        return None
+    return base64.b64encode(buf.tobytes()).decode("ascii")
+
+
+def _encode_depth_jpeg(depth_map) -> str | None:
+    """Colorize a DepthMap with Turbo colormap and encode as JPEG base64."""
+    try:
+        import cv2  # type: ignore
+    except ImportError:
+        return None
+    depth = np.asarray(depth_map.depth, dtype=np.float32)
+    depth_u8 = np.clip(depth * 255, 0, 255).astype(np.uint8)
+    colored_bgr = cv2.applyColorMap(depth_u8, cv2.COLORMAP_TURBO)
+    height, width = colored_bgr.shape[:2]
+    max_width = _OVERLAY_MAX_WIDTH
+    if width > max_width:
+        scale = max_width / width
+        colored_bgr = cv2.resize(
+            colored_bgr,
+            (max_width, int(height * scale)),
+            interpolation=cv2.INTER_AREA,
+        )
+    success, buf = cv2.imencode(".jpg", colored_bgr, [cv2.IMWRITE_JPEG_QUALITY, _JPEG_QUALITY])
     if not success:
         return None
     return base64.b64encode(buf.tobytes()).decode("ascii")
@@ -649,6 +675,12 @@ class WebSocketBridge:
         candidates = snapshot.get(TopicName.PLANNING_CANDIDATES.value)
         if candidates is not None:
             heavy[TopicName.PLANNING_CANDIDATES.value] = _serialize_candidates_for_dashboard(candidates)
+
+        depth_map = snapshot.get(TopicName.PERCEPTION_DEPTH.value)
+        if depth_map is not None:
+            depth_b64 = _encode_depth_jpeg(depth_map)
+            if depth_b64:
+                heavy[TopicName.PERCEPTION_DEPTH.value] = depth_b64
 
         return retained, dynamic, heavy
 

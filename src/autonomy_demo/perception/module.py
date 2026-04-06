@@ -37,6 +37,7 @@ from autonomy_demo.perception.tracking import KalmanSortTracker, SimpleSortTrack
 # Lazy imports for learned perception (optional heavy dependencies)
 _segformer_cls = None
 _learned_lane_cls = None
+_depth_estimator_cls = None
 
 
 @dataclass(slots=True)
@@ -44,10 +45,13 @@ class _PerceptionAuxPolicy:
     policy: str = "max_fidelity"
     enable_segformer: bool = True
     enable_learned_lanes: bool = True
+    enable_depth: bool = True
     allow_online_lane_training: bool = True
     segformer_run_every_n_ticks: int = 5
     lane_run_every_n_ticks: int = 1
+    depth_run_every_n_ticks: int = 5
     segformer_max_input_long_edge_px: int | None = None
+    depth_max_input_long_edge_px: int | None = 518
 
 
 @dataclass(slots=True)
@@ -89,9 +93,11 @@ def _resolve_perception_aux_policy(runtime_config) -> _PerceptionAuxPolicy:
                     policy="aggressive_budget",
                     enable_segformer=False,
                     enable_learned_lanes=False,
+                    enable_depth=False,
                     allow_online_lane_training=False,
                     segformer_run_every_n_ticks=10,
                     lane_run_every_n_ticks=10,
+                    depth_run_every_n_ticks=10,
                     segformer_max_input_long_edge_px=512,
                 )
             else:
@@ -99,9 +105,11 @@ def _resolve_perception_aux_policy(runtime_config) -> _PerceptionAuxPolicy:
                     policy="aggressive_budget",
                     enable_segformer=True,
                     enable_learned_lanes=False,
+                    enable_depth=True,
                     allow_online_lane_training=False,
                     segformer_run_every_n_ticks=10,
                     lane_run_every_n_ticks=10,
+                    depth_run_every_n_ticks=10,
                     segformer_max_input_long_edge_px=512,
                 )
         elif policy_name == "balanced":
@@ -109,9 +117,11 @@ def _resolve_perception_aux_policy(runtime_config) -> _PerceptionAuxPolicy:
                 policy="balanced",
                 enable_segformer=device != "cpu",
                 enable_learned_lanes=False,
+                enable_depth=device != "cpu",
                 allow_online_lane_training=False,
                 segformer_run_every_n_ticks=5,
                 lane_run_every_n_ticks=5,
+                depth_run_every_n_ticks=5,
                 segformer_max_input_long_edge_px=768,
             )
         else:
@@ -119,19 +129,24 @@ def _resolve_perception_aux_policy(runtime_config) -> _PerceptionAuxPolicy:
                 policy="max_fidelity",
                 enable_segformer=enable_learned,
                 enable_learned_lanes=enable_learned and device != "cpu",
+                enable_depth=enable_learned,
                 allow_online_lane_training=device != "cpu",
                 segformer_run_every_n_ticks=1,
                 lane_run_every_n_ticks=1,
+                depth_run_every_n_ticks=1,
                 segformer_max_input_long_edge_px=None,
+                depth_max_input_long_edge_px=None,
             )
     else:
         policy = _PerceptionAuxPolicy(
             policy=policy_name,
             enable_segformer=enable_learned,
             enable_learned_lanes=enable_learned,
+            enable_depth=enable_learned,
             allow_online_lane_training=True,
             segformer_run_every_n_ticks=5,
             lane_run_every_n_ticks=1,
+            depth_run_every_n_ticks=5,
             segformer_max_input_long_edge_px=None,
         )
 
@@ -139,19 +154,27 @@ def _resolve_perception_aux_policy(runtime_config) -> _PerceptionAuxPolicy:
         policy.enable_segformer = bool(aux_tuning["enable_segformer"])
     if "enable_learned_lanes" in aux_tuning:
         policy.enable_learned_lanes = bool(aux_tuning["enable_learned_lanes"])
+    if "enable_depth" in aux_tuning:
+        policy.enable_depth = bool(aux_tuning["enable_depth"])
     if "allow_online_lane_training" in aux_tuning:
         policy.allow_online_lane_training = bool(aux_tuning["allow_online_lane_training"])
     if "segformer_run_every_n_ticks" in aux_tuning:
         policy.segformer_run_every_n_ticks = max(int(aux_tuning["segformer_run_every_n_ticks"]), 1)
     if "lane_run_every_n_ticks" in aux_tuning:
         policy.lane_run_every_n_ticks = max(int(aux_tuning["lane_run_every_n_ticks"]), 1)
+    if "depth_run_every_n_ticks" in aux_tuning:
+        policy.depth_run_every_n_ticks = max(int(aux_tuning["depth_run_every_n_ticks"]), 1)
     if "segformer_max_input_long_edge_px" in aux_tuning:
         value = aux_tuning["segformer_max_input_long_edge_px"]
         policy.segformer_max_input_long_edge_px = None if value in {None, 0, "0"} else int(value)
+    if "depth_max_input_long_edge_px" in aux_tuning:
+        value = aux_tuning["depth_max_input_long_edge_px"]
+        policy.depth_max_input_long_edge_px = None if value in {None, 0, "0"} else int(value)
 
     if not enable_learned:
         policy.enable_segformer = False
         policy.enable_learned_lanes = False
+        policy.enable_depth = False
         policy.allow_online_lane_training = False
 
     return policy
@@ -308,6 +331,17 @@ def _get_learned_lane_class():
         except ImportError:
             _learned_lane_cls = False  # type: ignore[assignment]
     return _learned_lane_cls if _learned_lane_cls is not False else None
+
+
+def _get_depth_estimator_class():
+    global _depth_estimator_cls
+    if _depth_estimator_cls is None:
+        try:
+            from autonomy_demo.perception.depth_estimator import DepthAnythingEstimator
+            _depth_estimator_cls = DepthAnythingEstimator
+        except ImportError:
+            _depth_estimator_cls = False  # type: ignore[assignment]
+    return _depth_estimator_cls if _depth_estimator_cls is not False else None
 
 
 def _count_by_modality(
@@ -468,6 +502,7 @@ class _CameraSceneContextMixin:
         drivable_extractor: DrivableSpaceExtractor,
         learned_drivable_extractor=None,
         learned_lane_extractor=None,
+        depth_estimator=None,
     ) -> tuple[list[LaneLine], DrivableSpaceMask]:
         ego_xyz = np.asarray(bundle.gnss.world_xyz, dtype=np.float32)
         ego_yaw = float(bundle.metadata.get("ego_yaw_rad", 0.0))
@@ -535,6 +570,20 @@ class _CameraSceneContextMixin:
         else:
             bundle.metadata.setdefault("lane_source", "heuristic")
 
+        # --- Depth estimation ---
+        bundle.metadata["depth_inference_ms"] = 0.0
+        if depth_estimator is not None:
+            depth_map = depth_estimator.extract(
+                bundle.front_camera.frame,
+                bundle.front_camera.sensor_id,
+            )
+            if depth_map is not None:
+                bundle.metadata["depth_map"] = {
+                    bundle.front_camera.sensor_id: depth_map,
+                }
+                if getattr(depth_estimator, "ran_inference_last_call", False):
+                    bundle.metadata["depth_inference_ms"] = depth_estimator.last_inference_ms
+
         return lanes, drivable_space
 
 
@@ -556,6 +605,7 @@ class PerceptionStack(_CameraSceneContextMixin):
         self.drivable_extractor = DrivableSpaceExtractor()
         self.learned_drivable_extractor = None
         self.learned_lane_extractor = None
+        self.depth_estimator = None
         self.aux_policy = aux_policy or _PerceptionAuxPolicy()
         self.camera_budget_policy = camera_budget_policy or _PerceptionCameraBudgetPolicy()
         if enable_learned_perception:
@@ -572,6 +622,13 @@ class PerceptionStack(_CameraSceneContextMixin):
                     device=device,
                     run_every_n_ticks=self.aux_policy.lane_run_every_n_ticks,
                     allow_online_training=self.aux_policy.allow_online_lane_training,
+                )
+            depth_cls = _get_depth_estimator_class()
+            if depth_cls is not None and self.aux_policy.enable_depth:
+                self.depth_estimator = depth_cls(
+                    device=device,
+                    run_every_n_ticks=self.aux_policy.depth_run_every_n_ticks,
+                    max_input_long_edge_px=self.aux_policy.depth_max_input_long_edge_px,
                 )
         self.logger = get_logger(__name__, perception_mode="camera_v1")
         self._camera_order = ("front_camera", "left_camera", "right_camera", "rear_camera")
@@ -604,6 +661,7 @@ class PerceptionStack(_CameraSceneContextMixin):
                 drivable_extractor=self.drivable_extractor,
                 learned_drivable_extractor=self.learned_drivable_extractor,
                 learned_lane_extractor=self.learned_lane_extractor,
+                depth_estimator=self.depth_estimator,
             )
             status_summary = _build_perception_status(
                 active_mode="camera_v1",
@@ -1139,6 +1197,7 @@ class FusedPerceptionStack(_CameraSceneContextMixin):
                 drivable_extractor=self.drivable_extractor,
                 learned_drivable_extractor=self.learned_drivable_extractor,
                 learned_lane_extractor=self.learned_lane_extractor,
+                depth_estimator=getattr(self.camera_stack, "depth_estimator", None),
             )
             status_summary = _build_perception_status(
                     active_mode="fused_v1",
