@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from autonomy_demo.perception.internal_types import CameraSegmentationResult
 from autonomy_demo.perception.lane_extraction import LaneExtractor
 
 
@@ -147,3 +148,32 @@ def test_lane_extractor_does_not_recover_stale_pair_when_turn_smoothing_is_suppr
         ego_yaw_rate_rad_s=0.25,
     )
     assert lanes_during_turn == []
+
+
+def test_lane_extractor_accepts_segmentation_priors_without_regressing_detection() -> None:
+    extractor = LaneExtractor()
+    frame = _lane_frame()
+    priors = CameraSegmentationResult(
+        semantic_label_map=np.zeros(frame.shape[:2], dtype=np.uint8),
+        task_label_map=np.zeros(frame.shape[:2], dtype=np.uint8),
+        task_probabilities=np.zeros(frame.shape[:2] + (7,), dtype=np.float32),
+        drivable_prob=np.ones(frame.shape[:2], dtype=np.float32) * 0.9,
+        lane_boundary_prob=np.zeros(frame.shape[:2], dtype=np.float32),
+        curb_boundary_prob=np.zeros(frame.shape[:2], dtype=np.float32),
+        uncertainty=np.zeros(frame.shape[:2], dtype=np.float32),
+        source_sensor_id="front_camera",
+        model_name="test_model",
+        model_version="test_model",
+    )
+    priors.lane_boundary_prob[:, 120:150] = 0.9
+    priors.lane_boundary_prob[:, 490:520] = 0.9
+
+    lanes = extractor.extract(
+        frame,
+        sensor_id="front_camera",
+        ego_world_xyz=np.zeros(3, dtype=np.float32),
+        ego_yaw_rad=0.0,
+        segmentation_priors=priors,
+    )
+
+    assert len(lanes) == 2

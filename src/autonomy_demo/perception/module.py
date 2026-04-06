@@ -20,6 +20,7 @@ from autonomy_demo.interfaces.types import (
 from autonomy_demo.perception.drivable_space import DrivableSpaceExtractor
 from autonomy_demo.perception.fusion import fuse_detections
 from autonomy_demo.perception.internal_types import (
+    CameraSegmentationResult,
     FrameDetection2D,
     TrackedDetection2D,
     TrackedLidarClusterDetection,
@@ -27,6 +28,11 @@ from autonomy_demo.perception.internal_types import (
 from autonomy_demo.perception.lane_extraction import LaneExtractor
 from autonomy_demo.perception.lidar_detection import LidarObstacleDetector
 from autonomy_demo.perception.lidar_tracking import KalmanCentroidTracker3D, SimpleCentroidTracker3D
+from autonomy_demo.perception.segmentation_metrics import summarize_segmentation_metrics
+from autonomy_demo.perception.segmentation_tasks import (
+    remap_carla_semantic_to_task,
+    semantic_camera_rgb_to_label_map,
+)
 from autonomy_demo.perception.object_detection import (
     CameraInferenceRequest,
     YoloObjectDetector,
@@ -47,6 +53,7 @@ class _PerceptionAuxPolicy:
     enable_learned_lanes: bool = True
     enable_depth: bool = True
     allow_online_lane_training: bool = True
+    segformer_model_name: str = "nvidia/segformer-b0-finetuned-cityscapes-1024-1024"
     segformer_run_every_n_ticks: int = 5
     lane_run_every_n_ticks: int = 1
     depth_run_every_n_ticks: int = 5
@@ -158,6 +165,8 @@ def _resolve_perception_aux_policy(runtime_config) -> _PerceptionAuxPolicy:
         policy.enable_depth = bool(aux_tuning["enable_depth"])
     if "allow_online_lane_training" in aux_tuning:
         policy.allow_online_lane_training = bool(aux_tuning["allow_online_lane_training"])
+    if "segformer_model_name" in aux_tuning and aux_tuning["segformer_model_name"]:
+        policy.segformer_model_name = str(aux_tuning["segformer_model_name"])
     if "segformer_run_every_n_ticks" in aux_tuning:
         policy.segformer_run_every_n_ticks = max(int(aux_tuning["segformer_run_every_n_ticks"]), 1)
     if "lane_run_every_n_ticks" in aux_tuning:
@@ -509,6 +518,7 @@ class _CameraSceneContextMixin:
         ego_yaw_rate = float(bundle.imu.gyro_xyz[2])
         bundle.metadata["drivable_inference_ms"] = 0.0
         bundle.metadata["lane_inference_ms"] = 0.0
+        segmentation_result: CameraSegmentationResult | None = None
 
         # --- Drivable space: try learned model first, fall back to heuristic ---
         drivable_space = None
@@ -527,12 +537,31 @@ class _CameraSceneContextMixin:
                     bundle.metadata["semantic_seg_map"] = {
                         bundle.front_camera.sensor_id: seg_map,
                     }
+                segmentation_result = getattr(learned_drivable_extractor, "last_segmentation_result", None)
+                if segmentation_result is not None:
+                    bundle.metadata["segmentation_source"] = "student"
+                    bundle.metadata["segmentation_model_name"] = segmentation_result.model_name
+                    bundle.metadata["segmentation_model_version"] = segmentation_result.model_version
+                    bundle.metadata["segmentation_uncertainty_mean"] = float(
+                        np.mean(segmentation_result.uncertainty)
+                    )
+                    bundle.metadata["segmentation_uncertainty_p95"] = float(
+                        np.percentile(segmentation_result.uncertainty, 95)
+                    )
+                    if bundle.semantic_camera is not None:
+                        gt_labels = semantic_camera_rgb_to_label_map(bundle.semantic_camera.frame)
+                        gt_task_labels = remap_carla_semantic_to_task(gt_labels)
+                        bundle.metadata["segmentation_metrics"] = summarize_segmentation_metrics(
+                            segmentation_result,
+                            gt_task_labels,
+                        )
         if drivable_space is None:
             drivable_space = drivable_extractor.extract(
                 bundle.front_camera.frame,
                 bundle.front_camera.sensor_id,
             )
             bundle.metadata.setdefault("drivable_source", "heuristic")
+            bundle.metadata.setdefault("segmentation_source", "heuristic_fallback")
 
         # --- Lanes: always run heuristic (for training data + fallback) ---
         heuristic_lanes = lane_extractor.extract(
@@ -541,6 +570,7 @@ class _CameraSceneContextMixin:
             ego_world_xyz=ego_xyz,
             ego_yaw_rad=ego_yaw,
             ego_yaw_rate_rad_s=ego_yaw_rate,
+            segmentation_priors=segmentation_result,
         )
 
         # Try learned lane detector; it uses heuristic output for self-supervised training
@@ -613,6 +643,7 @@ class PerceptionStack(_CameraSceneContextMixin):
             if segformer_cls is not None and self.aux_policy.enable_segformer:
                 self.learned_drivable_extractor = segformer_cls(
                     device=device,
+                    model_name=self.aux_policy.segformer_model_name,
                     run_every_n_ticks=self.aux_policy.segformer_run_every_n_ticks,
                     max_input_long_edge_px=self.aux_policy.segformer_max_input_long_edge_px,
                 )

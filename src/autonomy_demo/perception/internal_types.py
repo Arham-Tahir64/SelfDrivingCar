@@ -50,3 +50,17 @@ class TrackedLidarClusterDetection(LidarClusterDetection):
     track_id: int = -1
     track_state: TrackState = TrackState.TENTATIVE
     velocity_xyz: FloatArray | None = None
+
+
+@dataclass(slots=True)
+class CameraSegmentationResult:
+    semantic_label_map: NDArray[np.uint8]
+    task_label_map: NDArray[np.uint8]
+    task_probabilities: FloatArray
+    drivable_prob: FloatArray
+    lane_boundary_prob: FloatArray
+    curb_boundary_prob: FloatArray
+    uncertainty: FloatArray
+    source_sensor_id: str
+    model_name: str
+    model_version: str

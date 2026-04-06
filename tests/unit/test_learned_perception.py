@@ -48,6 +48,9 @@ def test_segformer_extractor_loads_and_runs() -> None:
     assert result.mask.dtype == np.bool_
     assert result.class_probabilities.shape == (256, 512, 2)
     assert extractor.last_inference_ms > 0
+    assert extractor.last_segmentation_result is not None
+    assert extractor.last_segmentation_result.drivable_prob.shape == (256, 512)
+    assert extractor.last_segmentation_result.uncertainty.shape == (256, 512)
 
 
 def test_segformer_extractor_returns_none_for_invalid_input() -> None:
@@ -108,6 +111,27 @@ def test_segformer_extractor_downscales_input_but_preserves_output_shape() -> No
     assert max(fake_processor.last_image_shape) <= 128
     assert result.mask.shape == (256, 512)
     assert result.class_probabilities.shape == (256, 512, 2)
+
+
+def test_segformer_extractor_emits_structured_segmentation_result() -> None:
+    from autonomy_demo.perception.segformer_drivable import SegFormerDrivableExtractor
+
+    extractor = SegFormerDrivableExtractor(device="cpu")
+    fake_processor = _FakeSegformerProcessor()
+    extractor._processor = fake_processor
+    extractor._model = _FakeSegformerModel()
+    extractor._ensure_loaded = lambda: True  # type: ignore[method-assign]
+    image = np.random.randint(0, 255, (128, 256, 3), dtype=np.uint8)
+
+    result = extractor.extract(image, "front_camera")
+
+    assert result is not None
+    segmentation = extractor.last_segmentation_result
+    assert segmentation is not None
+    assert segmentation.semantic_label_map.shape == (128, 256)
+    assert segmentation.task_label_map.shape == (128, 256)
+    assert segmentation.task_probabilities.shape == (128, 256, 7)
+    assert segmentation.model_name.endswith("cityscapes-1024-1024")
 
 
 # ---------- Learned lane detector tests ----------
