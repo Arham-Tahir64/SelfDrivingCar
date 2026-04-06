@@ -1,4 +1,6 @@
+import type { CSSProperties } from "react";
 import { useState } from "react";
+import PanelHeader from "./PanelHeader";
 import { useFrameStore } from "../store/frameStore";
 
 type ViewMode = "perception" | "depth";
@@ -12,99 +14,98 @@ export default function CameraPanel() {
 
   const activeImage = viewMode === "depth" && depth ? depth : overlay;
   const altLabel = viewMode === "depth" ? "Depth map" : "Camera overlay";
-  const headerLabel =
-    viewMode === "depth"
-      ? "CAMERA \u2014 DEPTH (DepthAnything V2)"
-      : "CAMERA \u2014 PERCEPTION OVERLAY";
 
   return (
     <div style={styles.container}>
-      <div style={styles.label}>{headerLabel}</div>
+      <PanelHeader
+        title="Camera"
+        accentColor="#4DD0E1"
+        rightContent={
+          <div style={styles.toggleShell}>
+            <button
+              type="button"
+              onClick={() => setViewMode("perception")}
+              style={{
+                ...styles.toggleButton,
+                ...(viewMode === "perception" ? styles.toggleButtonActive : {}),
+              }}
+            >
+              SEG
+            </button>
+            <button
+              type="button"
+              onClick={() => setViewMode("depth")}
+              style={{
+                ...styles.toggleButton,
+                ...(viewMode === "depth" ? styles.toggleButtonActive : {}),
+                ...(!depth ? styles.toggleButtonDisabled : {}),
+              }}
+              disabled={!depth}
+            >
+              DEPTH
+            </button>
+          </div>
+        }
+      />
 
-      {/* View toggle */}
-      <div style={styles.toggle}>
-        <button
-          type="button"
-          onClick={() => setViewMode("perception")}
-          style={{
-            ...styles.toggleButton,
-            ...(viewMode === "perception" ? styles.toggleButtonActive : {}),
-          }}
-        >
-          SEG
-        </button>
-        <button
-          type="button"
-          onClick={() => setViewMode("depth")}
-          style={{
-            ...styles.toggleButton,
-            ...(viewMode === "depth" ? styles.toggleButtonActive : {}),
-            opacity: depth ? 1 : 0.35,
-          }}
-          disabled={!depth}
-        >
-          DEPTH
-        </button>
+      <div style={styles.content}>
+        {activeImage ? (
+          <img
+            src={`data:image/jpeg;base64,${activeImage}`}
+            alt={altLabel}
+            style={styles.image}
+          />
+        ) : (
+          <div style={styles.placeholder}>
+            <div style={styles.placeholderIcon}>&#x1F3A5;</div>
+            <div style={styles.placeholderText}>Waiting for camera feed...</div>
+          </div>
+        )}
       </div>
-
-      {activeImage ? (
-        <img
-          src={`data:image/jpeg;base64,${activeImage}`}
-          alt={altLabel}
-          style={styles.image}
-        />
-      ) : (
-        <div style={styles.placeholder}>
-          <div style={styles.placeholderIcon}>&#x1F3A5;</div>
-          <div style={styles.placeholderText}>Waiting for camera feed...</div>
-        </div>
-      )}
     </div>
   );
 }
 
-const styles: Record<string, React.CSSProperties> = {
+const styles: Record<string, CSSProperties> = {
   container: {
     width: "100%",
     height: "100%",
     backgroundColor: "#0d0d14",
     borderLeft: "1px solid #2a2a3a",
     borderBottom: "1px solid #2a2a3a",
-    position: "relative",
     overflow: "hidden",
     display: "flex",
     flexDirection: "column",
   },
-  label: {
-    position: "absolute",
-    top: 8,
-    left: 12,
-    color: "#4DD0E1",
-    fontSize: 10,
-    fontWeight: 700,
-    letterSpacing: 1.2,
-    zIndex: 1,
-    textShadow: "0 1px 4px rgba(0,0,0,0.8)",
+  content: {
+    position: "relative",
+    flex: 1,
+    minHeight: 0,
+    display: "flex",
   },
-  toggle: {
-    position: "absolute",
-    top: 6,
-    right: 12,
+  toggleShell: {
     display: "flex",
     gap: 4,
-    zIndex: 2,
+    padding: 2,
+    borderRadius: 999,
+    background: "rgba(13, 18, 30, 0.85)",
+    border: "1px solid rgba(96, 110, 140, 0.24)",
+    boxShadow: "inset 0 0 0 1px rgba(255,255,255,0.03)",
   },
   toggleButton: {
-    border: "1px solid rgba(96, 110, 140, 0.3)",
-    borderRadius: 6,
-    padding: "4px 10px",
-    background: "rgba(19, 24, 36, 0.9)",
+    border: "1px solid transparent",
+    borderRadius: 999,
+    padding: "3px 9px",
+    minWidth: 48,
+    background: "transparent",
     color: "rgba(215, 222, 236, 0.7)",
-    fontSize: 10,
+    fontSize: 9,
     fontWeight: 700,
-    letterSpacing: "0.08em",
+    letterSpacing: "0.12em",
+    lineHeight: 1.1,
+    textTransform: "uppercase",
     cursor: "pointer",
-    transition: "background 120ms ease, color 120ms ease",
+    transition: "background 120ms ease, color 120ms ease, border-color 120ms ease, opacity 120ms ease",
   },
   toggleButtonActive: {
     background:
@@ -113,6 +114,9 @@ const styles: Record<string, React.CSSProperties> = {
     borderColor: "rgba(55, 214, 255, 0.5)",
     boxShadow: "0 0 12px rgba(17, 190, 255, 0.16)",
   },
+  toggleButtonDisabled: {
+    opacity: 0.35,
+  },
   image: {
     width: "100%",
     height: "100%",
@@ -120,7 +124,8 @@ const styles: Record<string, React.CSSProperties> = {
     display: "block",
   },
   placeholder: {
-    flex: 1,
+    width: "100%",
+    height: "100%",
     display: "flex",
     flexDirection: "column",
     alignItems: "center",
