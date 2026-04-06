@@ -10,7 +10,7 @@ import numpy as np
 from autonomy_demo.common.geometry import distance_xyz
 from autonomy_demo.common.logging import get_logger
 from autonomy_demo.eval.metrics import LatencyAccumulator, MOTAccumulator
-from autonomy_demo.interfaces.enums import TopicName
+from autonomy_demo.interfaces.enums import ObjectClass, TopicName
 from autonomy_demo.interfaces.types import ControlCommand, DrivableSpaceMask, EgoPose, EgoTrajectory, EvaluationSummary, LaneLine, ObjectDetection, RoutePlan
 from autonomy_demo.planning.route_following import route_progress_distance
 
@@ -109,6 +109,9 @@ class LiveEvaluationHarness:
         self.previous_command_mode: str | None = None
         self.red_light_stop_checks = 0
         self.red_light_stop_successes = 0
+        self._red_light_violations = 0
+        self._prev_red_light_within_stop_line = False
+        self._min_pedestrian_clearance_m = float("inf")
         self._latency: LatencyAccumulator | None = None
         self._mot: MOTAccumulator = MOTAccumulator()
 
@@ -195,6 +198,20 @@ class LiveEvaluationHarness:
                 self.red_light_stop_checks += 1
                 if ego_pose.speed_mps <= 1.5:
                     self.red_light_stop_successes += 1
+            # Red-light violation: ego passes stop line while moving through a red/amber.
+            ego_past_stop_line = nearest_red.stop_line_distance_m <= 0.0
+            if ego_past_stop_line and ego_pose.speed_mps > 1.5 and not self._prev_red_light_within_stop_line:
+                self._red_light_violations += 1
+            self._prev_red_light_within_stop_line = ego_past_stop_line
+        else:
+            self._prev_red_light_within_stop_line = False
+        # Pedestrian clearance: track minimum distance to any detected pedestrian.
+        ego_xy = np.asarray(ego_pose.world_xyz, dtype=np.float32)[:2]
+        for detection in detections:
+            if isinstance(detection, ObjectDetection) and detection.object_class == ObjectClass.PEDESTRIAN:
+                ped_xy = np.mean(np.asarray(detection.world_bbox_3d, dtype=np.float32), axis=0)[:2]
+                clearance = float(np.linalg.norm(ego_xy - ped_xy))
+                self._min_pedestrian_clearance_m = min(self._min_pedestrian_clearance_m, clearance)
         self.speed_sum_mps += float(ego_pose.speed_mps)
         self.speed_samples += 1
         self.max_speed_mps = max(self.max_speed_mps, float(ego_pose.speed_mps))
@@ -262,13 +279,22 @@ class LiveEvaluationHarness:
         red_light_stop_compliance = (
             self.red_light_stop_successes / self.red_light_stop_checks if self.red_light_stop_checks else 1.0
         )
+        pedestrian_clearance_min_m = (
+            self._min_pedestrian_clearance_m if self._min_pedestrian_clearance_m < float("inf") else float("inf")
+        )
         success = (
             completion_rate >= self.scenario.eval.min_completion_rate
             and collision_count <= self.scenario.eval.max_collisions
+            and self._red_light_violations <= self.scenario.eval.max_red_light_violations
+            and (
+                self.scenario.eval.min_pedestrian_clearance_m <= 0.0
+                or pedestrian_clearance_min_m >= self.scenario.eval.min_pedestrian_clearance_m
+            )
         )
         notes = [
             "Live CARLA metrics enabled for distance, duration, speed, goal reach, and collisions.",
-            "Red-light and pedestrian-clearance metrics remain placeholder until scenario-specific event logic lands.",
+            f"Red-light violations: {self._red_light_violations}",
+            f"Pedestrian min clearance: {pedestrian_clearance_min_m:.2f} m",
             f"Perception avg detections/tick: {avg_detection_count:.2f}",
             f"Perception track continuity ratio: {track_continuity_ratio:.2f}",
             f"Perception lane output ratio: {lane_output_ratio:.2f}",
@@ -293,8 +319,8 @@ class LiveEvaluationHarness:
             success=success,
             completion_rate=float(completion_rate),
             collision_count=collision_count,
-            red_light_violations=0,
-            pedestrian_clearance_min_m=max(self.scenario.eval.min_pedestrian_clearance_m, 0.0),
+            red_light_violations=self._red_light_violations,
+            pedestrian_clearance_min_m=float(pedestrian_clearance_min_m) if pedestrian_clearance_min_m < float("inf") else 0.0,
             latency_ms=self._latency.mean() if self._latency else {},
             distance_traveled_m=float(self.distance_traveled_m),
             goal_reached=bool(self.goal_reached),

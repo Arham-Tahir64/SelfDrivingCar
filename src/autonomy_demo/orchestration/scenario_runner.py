@@ -29,8 +29,8 @@ from autonomy_demo.visualization.composite import CompositeVisualizationSink
 from autonomy_demo.sim.backends import CarlaSimulationBackend, StubSimulationBackend
 from autonomy_demo.visualization.service import NullVisualizationService
 from autonomy_demo.visualization.pygame_lidar_view import PygameLidarVisualizationService
-from autonomy_demo.visualization.websocket_bridge import WebSocketBridge
-from autonomy_demo.visualization.server import start_server_thread
+
+
 
 
 @dataclass(slots=True)
@@ -124,6 +124,9 @@ class ScenarioRunner:
         replay_writer = Hdf5OrJsonReplayWriter(self.output_dir) if record else None
         visualization_sinks = []
         if visualize:
+            from autonomy_demo.visualization.websocket_bridge import WebSocketBridge
+            from autonomy_demo.visualization.server import start_server_thread
+
             bridge = WebSocketBridge()
             start_server_thread(
                 bridge,
@@ -155,10 +158,12 @@ class ScenarioRunner:
                 k: v for k, v in behavior_tuning.items()
                 if k in RuleBasedBehaviorPlanner.__init__.__code__.co_varnames
             }) if behavior_tuning else RuleBasedBehaviorPlanner()
-            motion_planner = FrenetMotionPlanner(**{
+            planning_kwargs = {
                 k: v for k, v in planning_tuning.items()
                 if k in FrenetMotionPlanner.__init__.__code__.co_varnames
-            }) if planning_tuning else FrenetMotionPlanner()
+            } if planning_tuning else {}
+            planning_kwargs["lane_graph_provider"] = lane_graph_provider
+            motion_planner = FrenetMotionPlanner(**planning_kwargs)
             controller = RouteFollowerController(**{
                 k: v for k, v in control_tuning.items()
                 if k in RouteFollowerController.__init__.__code__.co_varnames

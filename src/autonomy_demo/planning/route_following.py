@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import heapq
 import math
 
 import numpy as np
@@ -30,6 +31,135 @@ def route_progress_distance(route_plan: RoutePlan, world_xyz: np.ndarray) -> flo
         ),
     )
     return float(nearest.cumulative_distance_m)
+
+
+def _centerline_length(centerline: np.ndarray) -> float:
+    """Compute total arc-length of an Nx3 centerline."""
+    if len(centerline) < 2:
+        return 0.0
+    diffs = np.diff(centerline[:, :2], axis=0)
+    return float(np.sum(np.linalg.norm(diffs, axis=1)))
+
+
+def build_route_plan_from_lane_graph(
+    lane_graph,
+    start_xyz: np.ndarray,
+    goal_xyz: np.ndarray,
+    *,
+    target_speed_mps: float = 12.0,
+    goal_tolerance_m: float = 6.0,
+) -> RoutePlan | None:
+    """Build a route via Dijkstra over the lane graph's successor topology.
+
+    Returns None if no path is found (disconnected graph, missing projections).
+    """
+    from autonomy_demo.mapping.lane_graph import LaneGraph
+
+    if not isinstance(lane_graph, LaneGraph) or not lane_graph.segments:
+        return None
+
+    start_proj = lane_graph.nearest_projection(np.asarray(start_xyz, dtype=np.float32))
+    goal_proj = lane_graph.nearest_projection(np.asarray(goal_xyz, dtype=np.float32))
+    if start_proj is None or goal_proj is None:
+        return None
+
+    start_lane = start_proj.lane_id
+    goal_lane = goal_proj.lane_id
+
+    if start_lane == goal_lane:
+        # Same lane — just use its centerline directly.
+        segment = lane_graph.segments[start_lane]
+        return _lane_sequence_to_route_plan(
+            [segment], goal_xyz, target_speed_mps, goal_tolerance_m
+        )
+
+    # Dijkstra: cost = cumulative centerline length.
+    dist: dict[str, float] = {start_lane: 0.0}
+    prev: dict[str, str | None] = {start_lane: None}
+    heap: list[tuple[float, str]] = [(0.0, start_lane)]
+
+    while heap:
+        cost, lane_id = heapq.heappop(heap)
+        if lane_id == goal_lane:
+            break
+        if cost > dist.get(lane_id, float("inf")):
+            continue
+        segment = lane_graph.segments.get(lane_id)
+        if segment is None:
+            continue
+        edge_cost = _centerline_length(segment.centerline_world)
+        for successor_id in segment.successor_lane_ids:
+            if successor_id not in lane_graph.segments:
+                continue
+            new_cost = cost + edge_cost
+            if new_cost < dist.get(successor_id, float("inf")):
+                dist[successor_id] = new_cost
+                prev[successor_id] = lane_id
+                heapq.heappush(heap, (new_cost, successor_id))
+
+    if goal_lane not in prev:
+        return None  # No path found.
+
+    # Reconstruct lane sequence.
+    lane_sequence: list[str] = []
+    current: str | None = goal_lane
+    while current is not None:
+        lane_sequence.append(current)
+        current = prev.get(current)
+    lane_sequence.reverse()
+
+    segments = [lane_graph.segments[lid] for lid in lane_sequence if lid in lane_graph.segments]
+    if not segments:
+        return None
+
+    return _lane_sequence_to_route_plan(segments, goal_xyz, target_speed_mps, goal_tolerance_m)
+
+
+def _lane_sequence_to_route_plan(
+    segments: list,
+    goal_xyz: np.ndarray,
+    target_speed_mps: float,
+    goal_tolerance_m: float,
+) -> RoutePlan:
+    """Stitch a sequence of lane segments into a RoutePlan."""
+    route_waypoints: list[RouteWaypoint] = []
+    cumulative_distance_m = 0.0
+    prev_point: np.ndarray | None = None
+
+    for segment in segments:
+        centerline = np.asarray(segment.centerline_world, dtype=np.float32)
+        speed = float(segment.speed_limit_mps) if segment.speed_limit_mps > 0.0 else target_speed_mps
+        for i, point in enumerate(centerline):
+            if prev_point is not None:
+                cumulative_distance_m += float(np.linalg.norm(point[:2] - prev_point[:2]))
+            # Compute yaw from consecutive centerline points.
+            if i + 1 < len(centerline):
+                dx = float(centerline[i + 1][0] - point[0])
+                dy = float(centerline[i + 1][1] - point[1])
+            elif prev_point is not None:
+                dx = float(point[0] - prev_point[0])
+                dy = float(point[1] - prev_point[1])
+            else:
+                dx, dy = 1.0, 0.0
+            yaw = math.atan2(dy, dx)
+            route_waypoints.append(
+                RouteWaypoint(
+                    x=float(point[0]),
+                    y=float(point[1]),
+                    z=float(point[2]),
+                    yaw=yaw,
+                    cumulative_distance_m=cumulative_distance_m,
+                    target_speed_mps=speed,
+                )
+            )
+            prev_point = point
+
+    return RoutePlan(
+        waypoints=route_waypoints,
+        goal_xyz=np.asarray(goal_xyz, dtype=np.float32),
+        total_distance_m=cumulative_distance_m,
+        goal_tolerance_m=goal_tolerance_m,
+    )
 
 
 def build_route_plan_for_carla(
@@ -169,13 +299,47 @@ class RouteFollowerMotionPlanner:
         *,
         target_speed_mps: float = 12.0,
         horizon_waypoints: int = 12,
+        lane_graph_provider=None,
     ) -> None:
         self.target_speed_mps = target_speed_mps
         self.horizon_waypoints = horizon_waypoints
         self.route_plan: RoutePlan | None = None
+        self.lane_graph_provider = lane_graph_provider
         self.logger = get_logger(__name__, planner="route_follower")
 
     def prepare_route(self, simulation, scenario: ScenarioConfig) -> None:
+        # Try graph-based routing first if a lane graph is available.
+        if self.lane_graph_provider is not None:
+            lane_graph = getattr(self.lane_graph_provider, "lane_graph", None)
+            if lane_graph is not None:
+                goal_xyz = np.array(
+                    [scenario.ego_goal.x, scenario.ego_goal.y, scenario.ego_goal.z],
+                    dtype=np.float32,
+                )
+                state = getattr(simulation, "state", None)
+                ego_actor = getattr(state, "ego_actor", None)
+                if ego_actor is not None:
+                    ego_loc = ego_actor.get_location()
+                    start_xyz = np.array(
+                        [float(ego_loc.x), float(ego_loc.y), float(ego_loc.z)],
+                        dtype=np.float32,
+                    )
+                    graph_route = build_route_plan_from_lane_graph(
+                        lane_graph,
+                        start_xyz,
+                        goal_xyz,
+                        target_speed_mps=self.target_speed_mps,
+                    )
+                    if graph_route is not None and graph_route.waypoints:
+                        self.route_plan = graph_route
+                        self.logger.info(
+                            "Graph-based route: %s waypoints, %.1f m",
+                            len(graph_route.waypoints),
+                            graph_route.total_distance_m,
+                        )
+                        return
+
+        # Fallback to greedy CARLA waypoint walk.
         self.route_plan = build_route_plan_for_carla(
             simulation,
             scenario,
