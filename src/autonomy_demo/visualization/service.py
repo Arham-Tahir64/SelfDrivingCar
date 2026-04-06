@@ -103,10 +103,10 @@ class NullVisualizationService:
             except Exception:
                 pass
         elif self._latest_drivable is not None and self._latest_drivable.mask.shape[:2] == frame.shape[:2]:
-            # Fallback: binary green drivable mask
+            # Fallback: binary cyan drivable mask for better separation from warm curb/boundary tones
             overlay = frame.copy()
             overlay[self._latest_drivable.mask] = (
-                0.7 * overlay[self._latest_drivable.mask] + np.array([0, 60, 0], dtype=np.uint8)
+                0.64 * overlay[self._latest_drivable.mask] + np.array([18, 96, 118], dtype=np.uint8)
             )
             frame = overlay.astype(np.uint8)
         for detection in self._latest_detections:

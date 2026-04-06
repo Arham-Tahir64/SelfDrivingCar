@@ -30,7 +30,7 @@ CITYSCAPES_LABELS: list[str] = [
 # (19, 3) uint8 RGB palette — index with palette[label_map] for fast colorization.
 CITYSCAPES_PALETTE: np.ndarray = np.array(
     [
-        [128, 64, 128],   # 0  road
+        [36, 196, 228],   # 0  road
         [244, 35, 232],   # 1  sidewalk
         [70, 70, 70],     # 2  building
         [102, 102, 156],  # 3  wall

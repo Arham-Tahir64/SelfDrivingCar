@@ -25,7 +25,7 @@ TASK_CLASS_NAMES: list[str] = [
 TASK_CLASS_PALETTE: np.ndarray = np.array(
     [
         [16, 20, 28],
-        [74, 166, 120],
+        [42, 210, 236],
         [255, 230, 90],
         [255, 123, 79],
         [136, 103, 202],

@@ -5,10 +5,10 @@ import { useFrameStore } from "../store/frameStore";
 import { frameInterpolationAlpha, interpolateEgoPose } from "../utils/interpolation";
 import { worldToScene, yawToScene, dampAngle } from "../utils/scene";
 
-// Green-tinted colour for drivable area
-const DRIVABLE_R = 0;
-const DRIVABLE_G = 220;
-const DRIVABLE_B = 90;
+// Cyan-tinted colour for drivable area to separate it from warm curb/boundary accents
+const DRIVABLE_R = 42;
+const DRIVABLE_G = 210;
+const DRIVABLE_B = 236;
 const MAX_ALPHA = 70; // keep the learned signal subtle over the structured road layer
 
 const POSITION_SMOOTHING = 0.22;
