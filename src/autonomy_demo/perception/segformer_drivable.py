@@ -57,7 +57,7 @@ class SegFormerDrivableExtractor:
         *,
         device: str = "cuda",
         model_name: str = "nvidia/segformer-b0-finetuned-cityscapes-1024-1024",
-        run_every_n_ticks: int = 5,
+        run_every_n_ticks: int = 3,
         max_input_long_edge_px: int | None = None,
         temporal_alpha: float = 0.68,
         ego_prior_strength: float = 0.12,
@@ -345,6 +345,17 @@ class SegFormerDrivableExtractor:
             borderValue=0.0,
         ).astype(np.float32)
 
+        # Suppress far-field extrapolation artifacts: the homography is only accurate in
+        # the near-field (bottom ~45% of the image). Zero out the upper portion where
+        # warpPerspective extrapolates unreliably and causes the "fall forward" distortion.
+        near_field_start_row = int(height * 0.55)
+        semantic_label_map[:near_field_start_row] = 0
+        task_probabilities[:near_field_start_row] = 0.0
+        task_label_map[:near_field_start_row] = 0
+        drivable_prob[:near_field_start_row] = 0.0
+        lane_boundary_prob[:near_field_start_row] = 0.0
+        curb_boundary_prob[:near_field_start_row] = 0.0
+
         age_s = 0.0
         if previous.source_sim_time_s is not None and current_context.sim_time_s is not None:
             age_s = max(float(current_context.sim_time_s) - float(previous.source_sim_time_s), 0.0)
@@ -440,10 +451,10 @@ class SegFormerDrivableExtractor:
     def _homography_anchor_pixels(self, *, width: int, height: int) -> np.ndarray:
         return np.array(
             [
-                [width * 0.18, height * 0.97],
-                [width * 0.82, height * 0.97],
-                [width * 0.36, height * 0.62],
-                [width * 0.64, height * 0.62],
+                [width * 0.15, height * 0.97],
+                [width * 0.85, height * 0.97],
+                [width * 0.32, height * 0.76],
+                [width * 0.68, height * 0.76],
             ],
             dtype=np.float32,
         )
