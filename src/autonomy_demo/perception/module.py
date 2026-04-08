@@ -44,6 +44,7 @@ from autonomy_demo.perception.tracking import KalmanSortTracker, SimpleSortTrack
 _segformer_cls = None
 _learned_lane_cls = None
 _depth_estimator_cls = None
+_egolanes_cls = None
 
 
 @dataclass(slots=True)
@@ -59,6 +60,11 @@ class _PerceptionAuxPolicy:
     depth_run_every_n_ticks: int = 5
     segformer_max_input_long_edge_px: int | None = None
     depth_max_input_long_edge_px: int | None = 518
+    lane_backend: str = "heuristic"
+    egolanes_model_path: str = ""
+    egolanes_run_every_n_ticks: int = 1
+    egolanes_confidence_threshold: float = 0.45
+    egolanes_max_input_long_edge_px: int | None = None
 
 
 @dataclass(slots=True)
@@ -86,6 +92,8 @@ class _CameraRuntimeState:
 
 
 def _resolve_perception_aux_policy(runtime_config) -> _PerceptionAuxPolicy:
+    from autonomy_demo.perception.egolanes import normalize_lane_backend
+
     tuning = dict(getattr(runtime_config, "tuning", {}) or {})
     aux_tuning = dict(tuning.get("perception_aux", {}) or {})
     policy_name = str(aux_tuning.get("policy") or "aggressive_budget").strip().lower()
@@ -106,6 +114,7 @@ def _resolve_perception_aux_policy(runtime_config) -> _PerceptionAuxPolicy:
                     lane_run_every_n_ticks=10,
                     depth_run_every_n_ticks=10,
                     segformer_max_input_long_edge_px=512,
+                    lane_backend="heuristic",
                 )
             else:
                 policy = _PerceptionAuxPolicy(
@@ -118,6 +127,7 @@ def _resolve_perception_aux_policy(runtime_config) -> _PerceptionAuxPolicy:
                     lane_run_every_n_ticks=10,
                     depth_run_every_n_ticks=10,
                     segformer_max_input_long_edge_px=512,
+                    lane_backend="heuristic",
                 )
         elif policy_name == "balanced":
             policy = _PerceptionAuxPolicy(
@@ -130,6 +140,7 @@ def _resolve_perception_aux_policy(runtime_config) -> _PerceptionAuxPolicy:
                 lane_run_every_n_ticks=5,
                 depth_run_every_n_ticks=3,
                 segformer_max_input_long_edge_px=768,
+                lane_backend="heuristic",
             )
         else:
             policy = _PerceptionAuxPolicy(
@@ -143,6 +154,7 @@ def _resolve_perception_aux_policy(runtime_config) -> _PerceptionAuxPolicy:
                 depth_run_every_n_ticks=1,
                 segformer_max_input_long_edge_px=None,
                 depth_max_input_long_edge_px=None,
+                lane_backend="heuristic",
             )
     else:
         policy = _PerceptionAuxPolicy(
@@ -155,6 +167,7 @@ def _resolve_perception_aux_policy(runtime_config) -> _PerceptionAuxPolicy:
             lane_run_every_n_ticks=1,
             depth_run_every_n_ticks=3,
             segformer_max_input_long_edge_px=None,
+            lane_backend="heuristic",
         )
 
     if "enable_segformer" in aux_tuning:
@@ -173,6 +186,17 @@ def _resolve_perception_aux_policy(runtime_config) -> _PerceptionAuxPolicy:
         policy.lane_run_every_n_ticks = max(int(aux_tuning["lane_run_every_n_ticks"]), 1)
     if "depth_run_every_n_ticks" in aux_tuning:
         policy.depth_run_every_n_ticks = max(int(aux_tuning["depth_run_every_n_ticks"]), 1)
+    if "lane_backend" in aux_tuning:
+        policy.lane_backend = normalize_lane_backend(aux_tuning["lane_backend"], default=policy.lane_backend)
+    if "egolanes_model_path" in aux_tuning and aux_tuning["egolanes_model_path"] is not None:
+        policy.egolanes_model_path = str(aux_tuning["egolanes_model_path"])
+    if "egolanes_run_every_n_ticks" in aux_tuning:
+        policy.egolanes_run_every_n_ticks = max(int(aux_tuning["egolanes_run_every_n_ticks"]), 1)
+    if "egolanes_confidence_threshold" in aux_tuning:
+        policy.egolanes_confidence_threshold = float(aux_tuning["egolanes_confidence_threshold"])
+    if "egolanes_max_input_long_edge_px" in aux_tuning:
+        value = aux_tuning["egolanes_max_input_long_edge_px"]
+        policy.egolanes_max_input_long_edge_px = None if value in {None, 0, "0"} else int(value)
     if "segformer_max_input_long_edge_px" in aux_tuning:
         value = aux_tuning["segformer_max_input_long_edge_px"]
         policy.segformer_max_input_long_edge_px = None if value in {None, 0, "0"} else int(value)
@@ -185,6 +209,7 @@ def _resolve_perception_aux_policy(runtime_config) -> _PerceptionAuxPolicy:
         policy.enable_learned_lanes = False
         policy.enable_depth = False
         policy.allow_online_lane_training = False
+        policy.lane_backend = "heuristic"
 
     return policy
 
@@ -340,6 +365,18 @@ def _get_learned_lane_class():
         except ImportError:
             _learned_lane_cls = False  # type: ignore[assignment]
     return _learned_lane_cls if _learned_lane_cls is not False else None
+
+
+def _get_egolanes_class():
+    global _egolanes_cls
+    if _egolanes_cls is None:
+        try:
+            from autonomy_demo.perception.egolanes import EgoLanesExtractor
+
+            _egolanes_cls = EgoLanesExtractor
+        except ImportError:
+            _egolanes_cls = False  # type: ignore[assignment]
+    return _egolanes_cls if _egolanes_cls is not False else None
 
 
 def _get_depth_estimator_class():
@@ -511,6 +548,8 @@ class _CameraSceneContextMixin:
         drivable_extractor: DrivableSpaceExtractor,
         learned_drivable_extractor=None,
         learned_lane_extractor=None,
+        egolanes_extractor=None,
+        aux_policy: _PerceptionAuxPolicy | None = None,
         depth_estimator=None,
     ) -> tuple[list[LaneLine], DrivableSpaceMask]:
         ego_xyz = np.asarray(bundle.gnss.world_xyz, dtype=np.float32)
@@ -518,6 +557,7 @@ class _CameraSceneContextMixin:
         ego_yaw_rate = float(bundle.imu.gyro_xyz[2])
         bundle.metadata["drivable_inference_ms"] = 0.0
         bundle.metadata["lane_inference_ms"] = 0.0
+        lane_backend = getattr(aux_policy, "lane_backend", "heuristic") if aux_policy is not None else "heuristic"
         segmentation_result: CameraSegmentationResult | None = None
 
         # --- Drivable space: try learned model first, fall back to heuristic ---
@@ -590,19 +630,43 @@ class _CameraSceneContextMixin:
             bundle.metadata.setdefault("drivable_source", "heuristic")
             bundle.metadata.setdefault("segmentation_source", "heuristic_fallback")
 
-        # --- Lanes: always run heuristic (for training data + fallback) ---
-        heuristic_lanes = lane_extractor.extract(
-            bundle.front_camera.frame,
-            sensor_id=bundle.front_camera.sensor_id,
-            ego_world_xyz=ego_xyz,
-            ego_yaw_rad=ego_yaw,
-            ego_yaw_rate_rad_s=ego_yaw_rate,
-            segmentation_priors=segmentation_result,
-        )
+        def _heuristic_lanes() -> list[LaneLine]:
+            return lane_extractor.extract(
+                bundle.front_camera.frame,
+                sensor_id=bundle.front_camera.sensor_id,
+                ego_world_xyz=ego_xyz,
+                ego_yaw_rad=ego_yaw,
+                ego_yaw_rate_rad_s=ego_yaw_rate,
+                segmentation_priors=segmentation_result,
+            )
 
-        # Try learned lane detector; it uses heuristic output for self-supervised training
-        lanes = heuristic_lanes
-        if learned_lane_extractor is not None:
+        lanes: list[LaneLine]
+        if lane_backend == "egolanes_onnx":
+            egolanes_lanes = None
+            if egolanes_extractor is not None:
+                egolanes_lanes = egolanes_extractor.extract(
+                    bundle.front_camera.frame,
+                    sensor_id=bundle.front_camera.sensor_id,
+                    ego_world_xyz=ego_xyz,
+                    ego_yaw_rad=ego_yaw,
+                    ego_yaw_rate_rad_s=ego_yaw_rate,
+                )
+            if egolanes_lanes is not None and len(egolanes_lanes) >= 2:
+                lanes = egolanes_lanes
+                bundle.metadata["lane_source"] = "egolanes"
+                bundle.metadata["lane_model_name"] = getattr(egolanes_extractor, "model_name", "EgoLanes")
+                if getattr(egolanes_extractor, "ran_inference_last_call", False):
+                    bundle.metadata["lane_inference_ms"] = egolanes_extractor.last_inference_ms
+            else:
+                lanes = _heuristic_lanes()
+                bundle.metadata["lane_source"] = "heuristic"
+                bundle.metadata["lane_fallback_reason"] = (
+                    getattr(egolanes_extractor, "load_error", None)
+                    or "invalid_egolanes_output"
+                )
+        elif lane_backend == "online_train" and learned_lane_extractor is not None:
+            heuristic_lanes = _heuristic_lanes()
+            lanes = heuristic_lanes
             learned_lanes = learned_lane_extractor.extract(
                 bundle.front_camera.frame,
                 sensor_id=bundle.front_camera.sensor_id,
@@ -625,6 +689,7 @@ class _CameraSceneContextMixin:
                 ):
                     bundle.metadata["lane_model_warmup"] = not learned_lane_extractor.is_trained
         else:
+            lanes = _heuristic_lanes()
             bundle.metadata.setdefault("lane_source", "heuristic")
 
         # --- Depth estimation ---
@@ -662,6 +727,7 @@ class PerceptionStack(_CameraSceneContextMixin):
         self.drivable_extractor = DrivableSpaceExtractor()
         self.learned_drivable_extractor = None
         self.learned_lane_extractor = None
+        self.egolanes_extractor = None
         self.depth_estimator = None
         self.aux_policy = aux_policy or _PerceptionAuxPolicy()
         self.camera_budget_policy = camera_budget_policy or _PerceptionCameraBudgetPolicy()
@@ -674,13 +740,26 @@ class PerceptionStack(_CameraSceneContextMixin):
                     run_every_n_ticks=self.aux_policy.segformer_run_every_n_ticks,
                     max_input_long_edge_px=self.aux_policy.segformer_max_input_long_edge_px,
                 )
-            learned_lane_cls = _get_learned_lane_class()
+            if self.aux_policy.lane_backend == "online_train":
+                learned_lane_cls = _get_learned_lane_class()
+            else:
+                learned_lane_cls = None
             if learned_lane_cls is not None and self.aux_policy.enable_learned_lanes:
                 self.learned_lane_extractor = learned_lane_cls(
                     device=device,
                     run_every_n_ticks=self.aux_policy.lane_run_every_n_ticks,
                     allow_online_training=self.aux_policy.allow_online_lane_training,
                 )
+            if self.aux_policy.lane_backend == "egolanes_onnx":
+                egolanes_cls = _get_egolanes_class()
+                if egolanes_cls is not None:
+                    self.egolanes_extractor = egolanes_cls(
+                        device=device,
+                        model_path=self.aux_policy.egolanes_model_path,
+                        run_every_n_ticks=self.aux_policy.egolanes_run_every_n_ticks,
+                        confidence_threshold=self.aux_policy.egolanes_confidence_threshold,
+                        max_input_long_edge_px=self.aux_policy.egolanes_max_input_long_edge_px,
+                    )
             depth_cls = _get_depth_estimator_class()
             if depth_cls is not None and self.aux_policy.enable_depth:
                 self.depth_estimator = depth_cls(
@@ -719,6 +798,8 @@ class PerceptionStack(_CameraSceneContextMixin):
                 drivable_extractor=self.drivable_extractor,
                 learned_drivable_extractor=self.learned_drivable_extractor,
                 learned_lane_extractor=self.learned_lane_extractor,
+                egolanes_extractor=self.egolanes_extractor,
+                aux_policy=self.aux_policy,
                 depth_estimator=self.depth_estimator,
             )
             status_summary = _build_perception_status(
@@ -1232,6 +1313,8 @@ class FusedPerceptionStack(_CameraSceneContextMixin):
         self.drivable_extractor = self.camera_stack.drivable_extractor
         self.learned_drivable_extractor = self.camera_stack.learned_drivable_extractor
         self.learned_lane_extractor = self.camera_stack.learned_lane_extractor
+        self.egolanes_extractor = self.camera_stack.egolanes_extractor
+        self.aux_policy = self.camera_stack.aux_policy
         self.logger = get_logger(__name__, perception_mode="fused_v1")
 
     def run(
@@ -1261,6 +1344,8 @@ class FusedPerceptionStack(_CameraSceneContextMixin):
                 drivable_extractor=self.drivable_extractor,
                 learned_drivable_extractor=self.learned_drivable_extractor,
                 learned_lane_extractor=self.learned_lane_extractor,
+                egolanes_extractor=self.egolanes_extractor,
+                aux_policy=self.aux_policy,
                 depth_estimator=getattr(self.camera_stack, "depth_estimator", None),
             )
             status_summary = _build_perception_status(

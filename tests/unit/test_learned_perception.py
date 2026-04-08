@@ -37,6 +37,29 @@ class _FakeLaneModel:
     def __call__(self, tensor):  # noqa: ANN001
         return torch.zeros((1, 1), dtype=torch.float32)
 
+
+class _FakeEgoLanesSession:
+    def __init__(self, output: np.ndarray) -> None:
+        self._output = np.asarray(output, dtype=np.float32)
+
+    def run(self, output_names, inputs):  # noqa: ANN001
+        del output_names, inputs
+        return [self._output]
+
+
+def _egolanes_output(
+    *,
+    height: int = 24,
+    width: int = 48,
+    include_right: bool = True,
+) -> np.ndarray:
+    output = np.zeros((1, 3, height, width), dtype=np.float32)
+    output[:, 2, :, :] = -2.0
+    output[:, 0, int(height * 0.45) :, 12:17] = 6.0
+    if include_right:
+        output[:, 1, int(height * 0.45) :, 31:36] = 6.0
+    return output
+
 def test_segformer_extractor_loads_and_runs() -> None:
     from autonomy_demo.perception.segformer_drivable import SegFormerDrivableExtractor
 
@@ -197,6 +220,78 @@ def test_segformer_extractor_reprojects_cached_segmentation_on_skipped_ticks() -
     assert not np.array_equal(first.mask, second.mask)
 
 
+# ---------- EgoLanes extractor tests ----------
+
+
+def test_egolanes_extractor_returns_none_for_invalid_input() -> None:
+    from autonomy_demo.perception.egolanes import EgoLanesExtractor
+
+    extractor = EgoLanesExtractor(device="cpu", model_path="C:/models/EgoLanes.onnx")
+    result = extractor.extract(np.zeros((80, 120), dtype=np.uint8), sensor_id="front_camera")
+    assert result is None
+
+
+def test_egolanes_extractor_decodes_two_ego_lanes_from_fake_onnx_output() -> None:
+    from autonomy_demo.perception.egolanes import EgoLanesExtractor
+
+    extractor = EgoLanesExtractor(device="cpu", model_path="C:/models/EgoLanes.onnx")
+    extractor._session = _FakeEgoLanesSession(_egolanes_output())
+    extractor._input_name = "input"
+    extractor._input_shape = [1, 3, 24, 48]
+    extractor._output_names = ["output"]
+    extractor._ensure_loaded = lambda: True  # type: ignore[method-assign]
+    image = np.zeros((120, 200, 3), dtype=np.uint8)
+
+    lanes = extractor.extract(image, sensor_id="front_camera")
+
+    assert lanes is not None
+    assert len(lanes) == 2
+    assert {lane.lane_id for lane in lanes} == {"lane_left", "lane_right"}
+    assert all(lane.position_estimate_kind == "egolanes_segmentation" for lane in lanes)
+    assert all(lane.source_modality == "learned" for lane in lanes)
+    left_lane = next(lane for lane in lanes if lane.lane_id == "lane_left")
+    right_lane = next(lane for lane in lanes if lane.lane_id == "lane_right")
+    assert float(np.mean(left_lane.polyline_image[:, 0])) < 90.0
+    assert float(np.mean(right_lane.polyline_image[:, 0])) > 110.0
+    assert extractor.ran_inference_last_call is True
+
+
+def test_egolanes_extractor_upsamples_model_output_to_image_space() -> None:
+    from autonomy_demo.perception.egolanes import EgoLanesExtractor
+
+    extractor = EgoLanesExtractor(device="cpu", model_path="C:/models/EgoLanes.onnx")
+    extractor._session = _FakeEgoLanesSession(_egolanes_output(height=24, width=48))
+    extractor._input_name = "input"
+    extractor._input_shape = [1, 3, 24, 48]
+    extractor._output_names = ["output"]
+    extractor._ensure_loaded = lambda: True  # type: ignore[method-assign]
+    image = np.zeros((240, 480, 3), dtype=np.uint8)
+
+    lanes = extractor.extract(image, sensor_id="front_camera")
+
+    assert lanes is not None
+    left_lane = next(lane for lane in lanes if lane.lane_id == "lane_left")
+    right_lane = next(lane for lane in lanes if lane.lane_id == "lane_right")
+    assert float(np.mean(left_lane.polyline_image[:, 0])) == pytest.approx(145.0, abs=30.0)
+    assert float(np.mean(right_lane.polyline_image[:, 0])) == pytest.approx(335.0, abs=30.0)
+
+
+def test_egolanes_extractor_returns_none_when_not_enough_ego_lanes_are_found() -> None:
+    from autonomy_demo.perception.egolanes import EgoLanesExtractor
+
+    extractor = EgoLanesExtractor(device="cpu", model_path="C:/models/EgoLanes.onnx")
+    extractor._session = _FakeEgoLanesSession(_egolanes_output(include_right=False))
+    extractor._input_name = "input"
+    extractor._input_shape = [1, 3, 24, 48]
+    extractor._output_names = ["output"]
+    extractor._ensure_loaded = lambda: True  # type: ignore[method-assign]
+    image = np.zeros((120, 200, 3), dtype=np.uint8)
+
+    lanes = extractor.extract(image, sensor_id="front_camera")
+
+    assert lanes is None
+
+
 # ---------- Learned lane detector tests ----------
 
 def test_learned_lane_extractor_warmup_returns_none() -> None:
@@ -307,7 +402,36 @@ def test_perception_stack_creates_learned_extractors_when_enabled() -> None:
 
     stack = PerceptionStack(device="cpu", model_variant="bootstrap", enable_learned_perception=True)
     assert stack.learned_drivable_extractor is not None
+    assert stack.learned_lane_extractor is None
+
+
+def test_perception_stack_creates_online_train_lane_extractor_when_requested() -> None:
+    from autonomy_demo.perception.module import PerceptionStack, _PerceptionAuxPolicy
+
+    stack = PerceptionStack(
+        device="cpu",
+        model_variant="bootstrap",
+        enable_learned_perception=True,
+        aux_policy=_PerceptionAuxPolicy(lane_backend="online_train"),
+    )
     assert stack.learned_lane_extractor is not None
+    assert stack.egolanes_extractor is None
+
+
+def test_perception_stack_creates_egolanes_extractor_when_requested() -> None:
+    from autonomy_demo.perception.module import PerceptionStack, _PerceptionAuxPolicy
+
+    stack = PerceptionStack(
+        device="cpu",
+        model_variant="bootstrap",
+        enable_learned_perception=True,
+        aux_policy=_PerceptionAuxPolicy(
+            lane_backend="egolanes_onnx",
+            egolanes_model_path="C:/models/EgoLanes.onnx",
+        ),
+    )
+    assert stack.learned_lane_extractor is None
+    assert stack.egolanes_extractor is not None
 
 
 def test_perception_stack_skips_learned_when_disabled() -> None:
@@ -316,6 +440,7 @@ def test_perception_stack_skips_learned_when_disabled() -> None:
     stack = PerceptionStack(device="cpu", model_variant="bootstrap", enable_learned_perception=False)
     assert stack.learned_drivable_extractor is None
     assert stack.learned_lane_extractor is None
+    assert stack.egolanes_extractor is None
 
 
 def test_build_perception_module_disables_aux_perception_for_live_cpu_by_default() -> None:
@@ -358,3 +483,4 @@ def test_build_perception_module_throttles_segformer_for_live_gpu_by_default() -
     assert module.learned_drivable_extractor._run_every_n_ticks == 10
     assert module.learned_drivable_extractor._max_input_long_edge_px == 512
     assert module.learned_lane_extractor is None
+    assert module.egolanes_extractor is None

@@ -3,8 +3,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from autonomy_demo.interfaces.enums import ObjectClass, SensorStatus, TrackState
-from autonomy_demo.interfaces.types import CameraFrame, GnssReading, ImuReading, LidarFrame, ObjectDetection, RadarFrame, SensorFrameBundle
+from autonomy_demo.interfaces.enums import LaneLineType, ObjectClass, SensorStatus, TrackState
+from autonomy_demo.interfaces.types import CameraFrame, GnssReading, ImuReading, LaneLine, LidarFrame, ObjectDetection, RadarFrame, SensorFrameBundle
 from autonomy_demo.mapping.module import StubMappingModule
 from autonomy_demo.perception.fusion import fuse_detections
 from autonomy_demo.perception.internal_types import FrameDetection2D
@@ -12,6 +12,7 @@ from autonomy_demo.perception.module import (
     FusedPerceptionStack,
     LidarPerceptionStack,
     PerceptionStack,
+    _PerceptionAuxPolicy,
     _PerceptionCameraBudgetPolicy,
     _resolve_perception_camera_budget_policy,
     build_perception_module,
@@ -123,6 +124,31 @@ def _lidar_bundle(*, sim_time_s: float = 0.0, ego_x: float = 0.0) -> SensorFrame
     )
 
 
+def _lane_pair() -> list[LaneLine]:
+    return [
+        LaneLine(
+            lane_id="lane_left",
+            polyline_image=np.array([[70.0, 112.0], [75.0, 96.0], [80.0, 80.0], [86.0, 64.0]], dtype=np.float32),
+            polyline_world=np.array([[5.0, 1.8, 0.0], [9.0, 1.7, 0.0], [13.0, 1.6, 0.0], [17.0, 1.5, 0.0]], dtype=np.float32),
+            line_type=LaneLineType.SOLID,
+            confidence=0.8,
+            source_modality="learned",
+            source_sensor_ids=["front_camera"],
+            position_estimate_kind="egolanes_segmentation",
+        ),
+        LaneLine(
+            lane_id="lane_right",
+            polyline_image=np.array([[130.0, 112.0], [125.0, 96.0], [120.0, 80.0], [114.0, 64.0]], dtype=np.float32),
+            polyline_world=np.array([[5.0, -1.8, 0.0], [9.0, -1.7, 0.0], [13.0, -1.6, 0.0], [17.0, -1.5, 0.0]], dtype=np.float32),
+            line_type=LaneLineType.SOLID,
+            confidence=0.81,
+            source_modality="learned",
+            source_sensor_ids=["front_camera"],
+            position_estimate_kind="egolanes_segmentation",
+        ),
+    ]
+
+
 def test_build_perception_module_respects_runtime_mode() -> None:
     runtime = type(
         "Runtime",
@@ -169,6 +195,46 @@ def test_perception_stack_converts_bootstrap_annotations() -> None:
     assert traffic_lights[0].source_modality == "bootstrap"
     assert cones == []
     assert bundle.metadata["perception_summary"].fallback_state == "bootstrap"
+
+
+def test_perception_stack_uses_egolanes_backend_when_available() -> None:
+    module = PerceptionStack(
+        device="cpu",
+        model_variant="bootstrap",
+        aux_policy=_PerceptionAuxPolicy(
+            lane_backend="egolanes_onnx",
+            egolanes_model_path="C:/models/EgoLanes.onnx",
+        ),
+    )
+    module.egolanes_extractor = _FakeEgoLanesExtractor(_lane_pair())
+    bundle = _bundle()
+
+    _detections, lanes, _drivable, _traffic_lights, _cones = module.run(bundle)
+
+    assert len(lanes) == 2
+    assert bundle.metadata["lane_source"] == "egolanes"
+    assert bundle.metadata["lane_model_name"] == "EgoLanes"
+    assert bundle.metadata["lane_inference_ms"] == 7.5
+    assert "lane_fallback_reason" not in bundle.metadata
+
+
+def test_perception_stack_falls_back_to_heuristic_when_egolanes_fails() -> None:
+    module = PerceptionStack(
+        device="cpu",
+        model_variant="bootstrap",
+        aux_policy=_PerceptionAuxPolicy(
+            lane_backend="egolanes_onnx",
+            egolanes_model_path="C:/models/EgoLanes.onnx",
+        ),
+    )
+    module.egolanes_extractor = _FakeEgoLanesExtractor(None, load_error="missing model path")
+    bundle = _bundle()
+
+    _detections, lanes, _drivable, _traffic_lights, _cones = module.run(bundle)
+
+    assert isinstance(lanes, list)
+    assert bundle.metadata["lane_source"] == "heuristic"
+    assert bundle.metadata["lane_fallback_reason"] == "missing model path"
 
 
 class _Scalar:
@@ -218,6 +284,22 @@ class _FakeAliasResult:
 class _FakeModel:
     def predict(self, source, device, verbose):  # noqa: ANN001
         return [_FakeResult()]
+
+
+class _FakeEgoLanesExtractor:
+    def __init__(self, lanes, *, load_error: str | None = None, last_inference_ms: float = 7.5) -> None:
+        self._lanes = lanes
+        self.load_error = load_error
+        self.last_inference_ms = last_inference_ms
+        self.ran_inference_last_call = lanes is not None
+
+    @property
+    def model_name(self) -> str:
+        return "EgoLanes"
+
+    def extract(self, frame, **kwargs):  # noqa: ANN001
+        del frame, kwargs
+        return self._lanes
 
 
 class _FakeAliasModel:

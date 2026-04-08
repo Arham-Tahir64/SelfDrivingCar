@@ -32,3 +32,10 @@ evaluation:
     prediction: 20
     planning: 25
     control: 5
+tuning:
+  perception_aux:
+    lane_backend: egolanes_onnx
+    egolanes_model_path: C:\Users\Arham\Desktop\CARLA_0.9.16\EgoLanes_FP32.onnx
+    egolanes_run_every_n_ticks: 1
+    egolanes_confidence_threshold: 0.45
+    egolanes_max_input_long_edge_px: 640

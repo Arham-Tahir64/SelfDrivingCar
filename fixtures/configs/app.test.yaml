@@ -25,3 +25,7 @@ evaluation:
   latency_budget_ms:
     perception: 60
     localization: 5
+tuning:
+  perception_aux:
+    lane_backend: egolanes_onnx
+    egolanes_model_path: C:\models\EgoLanes.onnx

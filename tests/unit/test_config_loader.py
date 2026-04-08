@@ -12,6 +12,8 @@ def test_load_runtime_config() -> None:
     assert config.perception_mode == "stub"
     assert config.perception_model_variant == "bootstrap"
     assert config.latency_budget_ms["perception"] == 60.0
+    assert config.tuning["perception_aux"]["lane_backend"] == "egolanes_onnx"
+    assert config.tuning["perception_aux"]["egolanes_model_path"].endswith("EgoLanes.onnx")
 
 
 def test_load_sensor_config() -> None:
