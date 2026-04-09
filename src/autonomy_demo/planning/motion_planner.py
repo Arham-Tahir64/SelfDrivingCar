@@ -230,6 +230,7 @@ class FrenetMotionPlanner:
         max_curvature_rad_per_m: float = 0.35,
         max_lateral_jerk_mps3: float = 6.0,
         max_longitudinal_jerk_mps3: float = 12.0,
+        lane_graph_provider=None,
     ) -> None:
         self.horizon_steps = horizon_steps
         self.dt_s = dt_s
@@ -244,6 +245,7 @@ class FrenetMotionPlanner:
         self._fallback = RouteFollowerMotionPlanner(
             target_speed_mps=cruise_speed_mps,
             horizon_waypoints=max(horizon_steps, 6),
+            lane_graph_provider=lane_graph_provider,
         )
         self.last_candidates: list[PlannerCandidate] = []
 
@@ -967,10 +969,12 @@ class FrenetMotionPlanner:
         safety_by_track: dict[int, float] = {}
         ego_radius = self._ego_radius_m()
         for track_id, detection in detections_by_track.items():
+            position_uncertainty = getattr(detection, "position_uncertainty_m", 0.0)
             safety_by_track[track_id] = (
                 ego_radius
                 + self._agent_radius_m(np.asarray(detection.world_bbox_3d, dtype=np.float32))
                 + _BASE_SAFETY_BUFFER_M
+                + position_uncertainty
             )
         for prediction in predictions:
             covariance_padding = 0.0

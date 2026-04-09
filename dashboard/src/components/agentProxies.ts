@@ -1,4 +1,9 @@
 import * as THREE from "three";
+import { buildVehicleMeshGroup, type VehicleVariant } from "./vehicleMeshes";
+
+type AgentProxyOptions = {
+  vehicleVariant?: VehicleVariant;
+};
 
 function addOutlinedMesh(
   group: THREE.Group,
@@ -43,73 +48,24 @@ function buildVehicleProxy(
   bodyColor: THREE.Color,
   outlineColor: THREE.Color,
   opacity: number,
+  options: AgentProxyOptions,
 ) {
-  const group = new THREE.Group();
-
-  addOutlinedMesh(
-    group,
-    new THREE.BoxGeometry(0.94, 0.26, 0.42),
-    standardMaterial(bodyColor, opacity, outlineColor, 0.16),
-    outlineColor,
-  );
-
-  addOutlinedMesh(
-    group,
-    new THREE.BoxGeometry(0.42, 0.2, 0.36),
-    standardMaterial(new THREE.Color("#dbe7f3"), Math.min(opacity + 0.05, 0.85), outlineColor, 0.12),
-    outlineColor,
-  ).position.set(0.05, 0.46, 0.0);
-
-  const windshield = new THREE.Mesh(
-    new THREE.BoxGeometry(0.18, 0.12, 0.34),
-    new THREE.MeshStandardMaterial({
-      color: new THREE.Color("#8ab4d6"),
-      transparent: true,
-      opacity: 0.52,
-      roughness: 0.12,
-      metalness: 0.25,
-      emissive: outlineColor,
-      emissiveIntensity: 0.08,
-    }),
-  );
-  windshield.position.set(0.18, 0.52, 0.0);
-  group.add(windshield);
-
-  addOutlinedMesh(
-    group,
-    new THREE.BoxGeometry(0.1, 0.08, 0.38),
-    standardMaterial(bodyColor, opacity, outlineColor, 0.12),
-    outlineColor,
-  ).position.set(0.46, 0.18, 0.0);
-
-  addOutlinedMesh(
-    group,
-    new THREE.BoxGeometry(0.08, 0.08, 0.38),
-    standardMaterial(bodyColor, opacity, outlineColor, 0.12),
-    outlineColor,
-  ).position.set(-0.46, 0.18, 0.0);
-
-  const wheelGeometry = new THREE.CylinderGeometry(0.09, 0.09, 0.06, 14);
-  const wheelMaterial = new THREE.MeshStandardMaterial({
-    color: new THREE.Color("#0b0d12"),
-    roughness: 0.95,
-    metalness: 0.02,
-    emissive: outlineColor,
-    emissiveIntensity: 0.02,
+  return buildVehicleMeshGroup({
+    variant: options.vehicleVariant ?? "sedan",
+    bodyColor,
+    accentColor: outlineColor,
+    trimColor: "#d9e4ef",
+    glassColor: "#0d1624",
+    bodyOpacity: Math.min(opacity + 0.26, 0.94),
+    bodyRoughness: 0.42,
+    bodyMetalness: 0.1,
+    glassOpacity: 0.84,
+    shadowOpacity: 0.2,
+    outlineOpacity: 0.78,
+    emissiveIntensity: 0.14,
+    headLightColor: "#d7f9ff",
+    tailLightColor: "#ff616f",
   });
-  for (const [x, z] of [
-    [0.32, 0.23],
-    [0.32, -0.23],
-    [-0.32, 0.23],
-    [-0.32, -0.23],
-  ]) {
-    const wheel = new THREE.Mesh(wheelGeometry, wheelMaterial.clone());
-    wheel.rotation.z = Math.PI * 0.5;
-    wheel.position.set(x, 0.11, z);
-    group.add(wheel);
-  }
-
-  return group;
 }
 
 function buildPedestrianProxy(
@@ -309,6 +265,7 @@ export function buildAgentProxy(
   bodyColor: THREE.Color,
   outlineColor: THREE.Color,
   opacity: number,
+  options: AgentProxyOptions = {},
 ) {
   const normalized = objectClass.trim().toLowerCase();
   switch (normalized) {
@@ -318,7 +275,7 @@ export function buildAgentProxy(
     case "truck":
     case "bus":
     case "van":
-      return buildVehicleProxy(bodyColor, outlineColor, opacity);
+      return buildVehicleProxy(bodyColor, outlineColor, opacity, options);
     case "pedestrian":
     case "person":
     case "walker":

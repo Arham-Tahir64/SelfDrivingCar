@@ -98,8 +98,10 @@ export default function BEVScene() {
   return (
     <>
       <color attach="background" args={["#0a0a0f"]} />
-      <ambientLight intensity={0.75} />
-      <directionalLight position={[50, 100, 50]} intensity={1.0} />
+      <ambientLight intensity={0.56} />
+      <hemisphereLight args={["#93c5fd", "#05070d", 0.62]} />
+      <directionalLight position={[50, 100, 50]} intensity={1.25} />
+      <directionalLight position={[-30, 26, -24]} intensity={0.35} color="#6dd3ff" />
       <CameraController />
       <Ground />
       <WorldLayerSurface />

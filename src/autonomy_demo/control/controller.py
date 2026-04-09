@@ -269,6 +269,11 @@ class RouteFollowerController:
                 lead_speed = float(
                     np.linalg.norm(np.asarray(getattr(detection, "velocity", [0.0, 0.0]), dtype=np.float32)[:2])
                 )
+                # For camera-projected positions, reduce gap by position uncertainty
+                # to brake earlier when depth estimate is unreliable.
+                pos_uncertainty = getattr(detection, "position_uncertainty_m", 0.0)
+                if pos_uncertainty > 0.0:
+                    longitudinal_gap = max(1.0, longitudinal_gap - pos_uncertainty)
             else:
                 target_xy = np.array([predicted.x, predicted.y], dtype=np.float32)
                 delta = target_xy - ego_xy

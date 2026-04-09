@@ -35,6 +35,7 @@ _WS_TOPICS = frozenset(
         TopicName.VISUALIZATION_PRIOR_MAP.value,
         TopicName.SENSOR_LIDAR.value,
         TopicName.PIPELINE_LATENCY.value,
+        TopicName.PERCEPTION_DEPTH.value,
     }
 )
 
@@ -77,23 +78,29 @@ _HEAVY_DYNAMIC_TOPICS = frozenset(
         TopicName.VISUALIZATION_BEV_DRIVABLE.value,
         TopicName.PREDICTION_AGENTS.value,
         TopicName.PLANNING_CANDIDATES.value,
+        TopicName.PERCEPTION_DEPTH.value,
     }
 )
 
 _WORLD_LAYER_STATIC_KEYS = ("signature", "roads", "lane_markers", "sidewalks")
 _WORLD_LAYER_DYNAMIC_KEYS = ("traffic_lights",)
 
-_LIDAR_MAX_POINTS = 300
+_LIDAR_MAX_POINTS = 1500
 _JPEG_QUALITY = 80
 _OVERLAY_MAX_WIDTH = 960
 _FAST_DYNAMIC_FPS = 8.0
-_HEAVY_DYNAMIC_FPS = 2.0
+_HEAVY_DYNAMIC_FPS = 6.0
 _WAYPOINT_STRIDE = 2
 _WS_STATS_LOG_INTERVAL_S = 5.0
 _LIDAR_PANEL_RANGE_M = 50.0
+_LIDAR_PANEL_REAR_RANGE_M = 8.0
+_LIDAR_PANEL_LATERAL_LIMIT_M = _LIDAR_PANEL_RANGE_M
 _LIDAR_FORWARD_CONE_LENGTH_M = 28.0
 _LIDAR_FORWARD_CONE_HALF_ANGLE_DEG = 18.0
 _LIDAR_THREAT_COUNT = 3
+_LIDAR_PRIORITY_POINT_RATIO = 0.65
+_LIDAR_PRIORITY_FORWARD_M = 35.0
+_LIDAR_PRIORITY_LATERAL_M = 12.0
 
 
 def _stable_json(value: Any) -> str:
@@ -147,14 +154,82 @@ def _encode_overlay_jpeg(frame_rgb: np.ndarray) -> str | None:
     return base64.b64encode(buf.tobytes()).decode("ascii")
 
 
-def _downsample_lidar(points_xyz: np.ndarray) -> list[list[float]]:
+def _encode_depth_jpeg(depth_map) -> str | None:
+    """Colorize a DepthMap with Turbo colormap and encode as JPEG base64."""
+    try:
+        import cv2  # type: ignore
+    except ImportError:
+        return None
+    depth = np.asarray(depth_map.depth, dtype=np.float32)
+    depth_u8 = np.clip(depth * 255, 0, 255).astype(np.uint8)
+    colored_bgr = cv2.applyColorMap(depth_u8, cv2.COLORMAP_TURBO)
+    height, width = colored_bgr.shape[:2]
+    max_width = _OVERLAY_MAX_WIDTH
+    if width > max_width:
+        scale = max_width / width
+        colored_bgr = cv2.resize(
+            colored_bgr,
+            (max_width, int(height * scale)),
+            interpolation=cv2.INTER_AREA,
+        )
+    success, buf = cv2.imencode(".jpg", colored_bgr, [cv2.IMWRITE_JPEG_QUALITY, _JPEG_QUALITY])
+    if not success:
+        return None
+    return base64.b64encode(buf.tobytes()).decode("ascii")
+
+
+def _lidar_points_in_panel_roi(points_xyz: np.ndarray) -> np.ndarray:
+    if points_xyz.ndim != 2 or points_xyz.shape[1] < 3:
+        return np.empty((0, 3), dtype=np.float32)
+    mask = (
+        (points_xyz[:, 0] >= -_LIDAR_PANEL_REAR_RANGE_M)
+        & (points_xyz[:, 0] <= _LIDAR_PANEL_RANGE_M)
+        & (np.abs(points_xyz[:, 1]) <= _LIDAR_PANEL_LATERAL_LIMIT_M)
+    )
+    return points_xyz[mask]
+
+
+def _evenly_sample_points(points_xyz: np.ndarray, sample_count: int) -> np.ndarray:
     count = int(points_xyz.shape[0])
+    if count == 0 or sample_count <= 0:
+        return np.empty((0, points_xyz.shape[1] if points_xyz.ndim == 2 else 3), dtype=np.float32)
+    if count <= sample_count:
+        return points_xyz
+    indices = np.linspace(0, count - 1, sample_count, dtype=np.int32)
+    return points_xyz[indices]
+
+
+def _downsample_lidar(points_xyz: np.ndarray) -> list[list[float]]:
+    roi_points = _lidar_points_in_panel_roi(np.asarray(points_xyz, dtype=np.float32))
+    count = int(roi_points.shape[0])
     if count == 0:
         return []
     if count <= _LIDAR_MAX_POINTS:
-        return points_xyz.tolist()
-    indices = np.linspace(0, count - 1, _LIDAR_MAX_POINTS, dtype=np.int32)
-    return points_xyz[indices].tolist()
+        return roi_points.tolist()
+
+    priority_mask = (
+        (roi_points[:, 0] >= 0.0)
+        & (roi_points[:, 0] <= _LIDAR_PRIORITY_FORWARD_M)
+        & (np.abs(roi_points[:, 1]) <= _LIDAR_PRIORITY_LATERAL_M)
+    )
+    priority_points = roi_points[priority_mask]
+    secondary_points = roi_points[~priority_mask]
+
+    priority_budget = min(
+        int(math.ceil(_LIDAR_MAX_POINTS * _LIDAR_PRIORITY_POINT_RATIO)),
+        int(priority_points.shape[0]),
+    )
+    secondary_budget = _LIDAR_MAX_POINTS - priority_budget
+    secondary_sample_count = min(secondary_budget, int(secondary_points.shape[0]))
+    priority_sample_count = min(int(priority_points.shape[0]), _LIDAR_MAX_POINTS - secondary_sample_count)
+
+    sampled_priority = _evenly_sample_points(priority_points, priority_sample_count)
+    sampled_secondary = _evenly_sample_points(secondary_points, secondary_sample_count)
+    sampled_points = np.vstack([sampled_priority, sampled_secondary])
+
+    if int(sampled_points.shape[0]) > _LIDAR_MAX_POINTS:
+        sampled_points = sampled_points[:_LIDAR_MAX_POINTS]
+    return sampled_points.tolist()
 
 
 def _world_to_ego_xy(world_xyz: np.ndarray | list[float], ego_pose: Any) -> np.ndarray | None:
@@ -649,6 +724,12 @@ class WebSocketBridge:
         candidates = snapshot.get(TopicName.PLANNING_CANDIDATES.value)
         if candidates is not None:
             heavy[TopicName.PLANNING_CANDIDATES.value] = _serialize_candidates_for_dashboard(candidates)
+
+        depth_map = snapshot.get(TopicName.PERCEPTION_DEPTH.value)
+        if depth_map is not None:
+            depth_b64 = _encode_depth_jpeg(depth_map)
+            if depth_b64:
+                heavy[TopicName.PERCEPTION_DEPTH.value] = depth_b64
 
         return retained, dynamic, heavy
 

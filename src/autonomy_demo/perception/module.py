@@ -20,6 +20,7 @@ from autonomy_demo.interfaces.types import (
 from autonomy_demo.perception.drivable_space import DrivableSpaceExtractor
 from autonomy_demo.perception.fusion import fuse_detections
 from autonomy_demo.perception.internal_types import (
+    CameraSegmentationResult,
     FrameDetection2D,
     TrackedDetection2D,
     TrackedLidarClusterDetection,
@@ -27,6 +28,11 @@ from autonomy_demo.perception.internal_types import (
 from autonomy_demo.perception.lane_extraction import LaneExtractor
 from autonomy_demo.perception.lidar_detection import LidarObstacleDetector
 from autonomy_demo.perception.lidar_tracking import KalmanCentroidTracker3D, SimpleCentroidTracker3D
+from autonomy_demo.perception.segmentation_metrics import summarize_segmentation_metrics
+from autonomy_demo.perception.segmentation_tasks import (
+    remap_carla_semantic_to_task,
+    semantic_camera_rgb_to_label_map,
+)
 from autonomy_demo.perception.object_detection import (
     CameraInferenceRequest,
     YoloObjectDetector,
@@ -37,6 +43,8 @@ from autonomy_demo.perception.tracking import KalmanSortTracker, SimpleSortTrack
 # Lazy imports for learned perception (optional heavy dependencies)
 _segformer_cls = None
 _learned_lane_cls = None
+_depth_estimator_cls = None
+_egolanes_cls = None
 
 
 @dataclass(slots=True)
@@ -44,10 +52,19 @@ class _PerceptionAuxPolicy:
     policy: str = "max_fidelity"
     enable_segformer: bool = True
     enable_learned_lanes: bool = True
+    enable_depth: bool = True
     allow_online_lane_training: bool = True
+    segformer_model_name: str = "nvidia/segformer-b0-finetuned-cityscapes-1024-1024"
     segformer_run_every_n_ticks: int = 5
     lane_run_every_n_ticks: int = 1
+    depth_run_every_n_ticks: int = 5
     segformer_max_input_long_edge_px: int | None = None
+    depth_max_input_long_edge_px: int | None = 518
+    lane_backend: str = "heuristic"
+    egolanes_model_path: str = ""
+    egolanes_run_every_n_ticks: int = 1
+    egolanes_confidence_threshold: float = 0.45
+    egolanes_max_input_long_edge_px: int | None = None
 
 
 @dataclass(slots=True)
@@ -75,6 +92,8 @@ class _CameraRuntimeState:
 
 
 def _resolve_perception_aux_policy(runtime_config) -> _PerceptionAuxPolicy:
+    from autonomy_demo.perception.egolanes import normalize_lane_backend
+
     tuning = dict(getattr(runtime_config, "tuning", {}) or {})
     aux_tuning = dict(tuning.get("perception_aux", {}) or {})
     policy_name = str(aux_tuning.get("policy") or "aggressive_budget").strip().lower()
@@ -89,70 +108,108 @@ def _resolve_perception_aux_policy(runtime_config) -> _PerceptionAuxPolicy:
                     policy="aggressive_budget",
                     enable_segformer=False,
                     enable_learned_lanes=False,
+                    enable_depth=False,
                     allow_online_lane_training=False,
                     segformer_run_every_n_ticks=10,
                     lane_run_every_n_ticks=10,
+                    depth_run_every_n_ticks=10,
                     segformer_max_input_long_edge_px=512,
+                    lane_backend="heuristic",
                 )
             else:
                 policy = _PerceptionAuxPolicy(
                     policy="aggressive_budget",
                     enable_segformer=True,
                     enable_learned_lanes=False,
+                    enable_depth=True,
                     allow_online_lane_training=False,
                     segformer_run_every_n_ticks=10,
                     lane_run_every_n_ticks=10,
+                    depth_run_every_n_ticks=10,
                     segformer_max_input_long_edge_px=512,
+                    lane_backend="heuristic",
                 )
         elif policy_name == "balanced":
             policy = _PerceptionAuxPolicy(
                 policy="balanced",
                 enable_segformer=device != "cpu",
                 enable_learned_lanes=False,
+                enable_depth=device != "cpu",
                 allow_online_lane_training=False,
                 segformer_run_every_n_ticks=5,
                 lane_run_every_n_ticks=5,
+                depth_run_every_n_ticks=3,
                 segformer_max_input_long_edge_px=768,
+                lane_backend="heuristic",
             )
         else:
             policy = _PerceptionAuxPolicy(
                 policy="max_fidelity",
                 enable_segformer=enable_learned,
                 enable_learned_lanes=enable_learned and device != "cpu",
+                enable_depth=enable_learned,
                 allow_online_lane_training=device != "cpu",
                 segformer_run_every_n_ticks=1,
                 lane_run_every_n_ticks=1,
+                depth_run_every_n_ticks=1,
                 segformer_max_input_long_edge_px=None,
+                depth_max_input_long_edge_px=None,
+                lane_backend="heuristic",
             )
     else:
         policy = _PerceptionAuxPolicy(
             policy=policy_name,
             enable_segformer=enable_learned,
             enable_learned_lanes=enable_learned,
+            enable_depth=enable_learned,
             allow_online_lane_training=True,
             segformer_run_every_n_ticks=5,
             lane_run_every_n_ticks=1,
+            depth_run_every_n_ticks=3,
             segformer_max_input_long_edge_px=None,
+            lane_backend="heuristic",
         )
 
     if "enable_segformer" in aux_tuning:
         policy.enable_segformer = bool(aux_tuning["enable_segformer"])
     if "enable_learned_lanes" in aux_tuning:
         policy.enable_learned_lanes = bool(aux_tuning["enable_learned_lanes"])
+    if "enable_depth" in aux_tuning:
+        policy.enable_depth = bool(aux_tuning["enable_depth"])
     if "allow_online_lane_training" in aux_tuning:
         policy.allow_online_lane_training = bool(aux_tuning["allow_online_lane_training"])
+    if "segformer_model_name" in aux_tuning and aux_tuning["segformer_model_name"]:
+        policy.segformer_model_name = str(aux_tuning["segformer_model_name"])
     if "segformer_run_every_n_ticks" in aux_tuning:
         policy.segformer_run_every_n_ticks = max(int(aux_tuning["segformer_run_every_n_ticks"]), 1)
     if "lane_run_every_n_ticks" in aux_tuning:
         policy.lane_run_every_n_ticks = max(int(aux_tuning["lane_run_every_n_ticks"]), 1)
+    if "depth_run_every_n_ticks" in aux_tuning:
+        policy.depth_run_every_n_ticks = max(int(aux_tuning["depth_run_every_n_ticks"]), 1)
+    if "lane_backend" in aux_tuning:
+        policy.lane_backend = normalize_lane_backend(aux_tuning["lane_backend"], default=policy.lane_backend)
+    if "egolanes_model_path" in aux_tuning and aux_tuning["egolanes_model_path"] is not None:
+        policy.egolanes_model_path = str(aux_tuning["egolanes_model_path"])
+    if "egolanes_run_every_n_ticks" in aux_tuning:
+        policy.egolanes_run_every_n_ticks = max(int(aux_tuning["egolanes_run_every_n_ticks"]), 1)
+    if "egolanes_confidence_threshold" in aux_tuning:
+        policy.egolanes_confidence_threshold = float(aux_tuning["egolanes_confidence_threshold"])
+    if "egolanes_max_input_long_edge_px" in aux_tuning:
+        value = aux_tuning["egolanes_max_input_long_edge_px"]
+        policy.egolanes_max_input_long_edge_px = None if value in {None, 0, "0"} else int(value)
     if "segformer_max_input_long_edge_px" in aux_tuning:
         value = aux_tuning["segformer_max_input_long_edge_px"]
         policy.segformer_max_input_long_edge_px = None if value in {None, 0, "0"} else int(value)
+    if "depth_max_input_long_edge_px" in aux_tuning:
+        value = aux_tuning["depth_max_input_long_edge_px"]
+        policy.depth_max_input_long_edge_px = None if value in {None, 0, "0"} else int(value)
 
     if not enable_learned:
         policy.enable_segformer = False
         policy.enable_learned_lanes = False
+        policy.enable_depth = False
         policy.allow_online_lane_training = False
+        policy.lane_backend = "heuristic"
 
     return policy
 
@@ -308,6 +365,29 @@ def _get_learned_lane_class():
         except ImportError:
             _learned_lane_cls = False  # type: ignore[assignment]
     return _learned_lane_cls if _learned_lane_cls is not False else None
+
+
+def _get_egolanes_class():
+    global _egolanes_cls
+    if _egolanes_cls is None:
+        try:
+            from autonomy_demo.perception.egolanes import EgoLanesExtractor
+
+            _egolanes_cls = EgoLanesExtractor
+        except ImportError:
+            _egolanes_cls = False  # type: ignore[assignment]
+    return _egolanes_cls if _egolanes_cls is not False else None
+
+
+def _get_depth_estimator_class():
+    global _depth_estimator_cls
+    if _depth_estimator_cls is None:
+        try:
+            from autonomy_demo.perception.depth_estimator import DepthAnythingEstimator
+            _depth_estimator_cls = DepthAnythingEstimator
+        except ImportError:
+            _depth_estimator_cls = False  # type: ignore[assignment]
+    return _depth_estimator_cls if _depth_estimator_cls is not False else None
 
 
 def _count_by_modality(
@@ -468,43 +548,125 @@ class _CameraSceneContextMixin:
         drivable_extractor: DrivableSpaceExtractor,
         learned_drivable_extractor=None,
         learned_lane_extractor=None,
+        egolanes_extractor=None,
+        aux_policy: _PerceptionAuxPolicy | None = None,
+        depth_estimator=None,
     ) -> tuple[list[LaneLine], DrivableSpaceMask]:
         ego_xyz = np.asarray(bundle.gnss.world_xyz, dtype=np.float32)
         ego_yaw = float(bundle.metadata.get("ego_yaw_rad", 0.0))
         ego_yaw_rate = float(bundle.imu.gyro_xyz[2])
         bundle.metadata["drivable_inference_ms"] = 0.0
         bundle.metadata["lane_inference_ms"] = 0.0
+        lane_backend = getattr(aux_policy, "lane_backend", "heuristic") if aux_policy is not None else "heuristic"
+        segmentation_result: CameraSegmentationResult | None = None
 
         # --- Drivable space: try learned model first, fall back to heuristic ---
         drivable_space = None
+        camera_calibration = (
+            (bundle.metadata.get("camera_calibration", {}) or {}).get(bundle.front_camera.sensor_id)
+        )
         if learned_drivable_extractor is not None:
             drivable_space = learned_drivable_extractor.extract(
                 bundle.front_camera.frame,
                 bundle.front_camera.sensor_id,
+                frame_id=bundle.front_camera.frame_id,
+                tick_id=bundle.tick_id,
+                sim_time_s=bundle.sim_time_s,
+                ego_world_xyz=ego_xyz,
+                ego_yaw_rad=ego_yaw,
+                camera_calibration=camera_calibration,
             )
             if drivable_space is not None:
                 bundle.metadata["drivable_source"] = "segformer"
                 if getattr(learned_drivable_extractor, "ran_inference_last_call", False):
                     bundle.metadata["drivable_inference_ms"] = learned_drivable_extractor.last_inference_ms
+                # Expose full semantic segmentation map for visualization
+                seg_map = getattr(learned_drivable_extractor, "last_seg_map", None)
+                if seg_map is not None:
+                    bundle.metadata["semantic_seg_map"] = {
+                        bundle.front_camera.sensor_id: seg_map,
+                    }
+                segmentation_result = getattr(learned_drivable_extractor, "last_segmentation_result", None)
+                if segmentation_result is not None:
+                    bundle.metadata["segmentation_source"] = (
+                        "student_reprojected" if getattr(segmentation_result, "reprojected", False) else "student"
+                    )
+                    bundle.metadata["segmentation_model_name"] = segmentation_result.model_name
+                    bundle.metadata["segmentation_model_version"] = segmentation_result.model_version
+                    bundle.metadata["segmentation_source_tick_id"] = segmentation_result.source_tick_id
+                    bundle.metadata["segmentation_warped_from_tick_id"] = segmentation_result.warped_from_tick_id
+                    bundle.metadata["segmentation_uncertainty_mean"] = float(
+                        np.mean(segmentation_result.uncertainty)
+                    )
+                    bundle.metadata["segmentation_uncertainty_p95"] = float(
+                        np.percentile(segmentation_result.uncertainty, 95)
+                    )
+                    if (
+                        segmentation_result.warped_from_tick_id is not None
+                        and segmentation_result.source_tick_id is not None
+                    ):
+                        bundle.metadata["segmentation_reprojection_age_ticks"] = max(
+                            int(segmentation_result.source_tick_id) - int(segmentation_result.warped_from_tick_id),
+                            0,
+                        )
+                    elif (
+                        segmentation_result.source_sim_time_s is not None
+                        and segmentation_result.warped_from_tick_id is not None
+                        and bundle.sim_time_s is not None
+                    ):
+                        bundle.metadata["segmentation_reprojection_age_ticks"] = 0
+                    if bundle.semantic_camera is not None:
+                        gt_labels = semantic_camera_rgb_to_label_map(bundle.semantic_camera.frame)
+                        gt_task_labels = remap_carla_semantic_to_task(gt_labels)
+                        bundle.metadata["segmentation_metrics"] = summarize_segmentation_metrics(
+                            segmentation_result,
+                            gt_task_labels,
+                        )
         if drivable_space is None:
             drivable_space = drivable_extractor.extract(
                 bundle.front_camera.frame,
                 bundle.front_camera.sensor_id,
             )
             bundle.metadata.setdefault("drivable_source", "heuristic")
+            bundle.metadata.setdefault("segmentation_source", "heuristic_fallback")
 
-        # --- Lanes: always run heuristic (for training data + fallback) ---
-        heuristic_lanes = lane_extractor.extract(
-            bundle.front_camera.frame,
-            sensor_id=bundle.front_camera.sensor_id,
-            ego_world_xyz=ego_xyz,
-            ego_yaw_rad=ego_yaw,
-            ego_yaw_rate_rad_s=ego_yaw_rate,
-        )
+        def _heuristic_lanes() -> list[LaneLine]:
+            return lane_extractor.extract(
+                bundle.front_camera.frame,
+                sensor_id=bundle.front_camera.sensor_id,
+                ego_world_xyz=ego_xyz,
+                ego_yaw_rad=ego_yaw,
+                ego_yaw_rate_rad_s=ego_yaw_rate,
+                segmentation_priors=segmentation_result,
+            )
 
-        # Try learned lane detector; it uses heuristic output for self-supervised training
-        lanes = heuristic_lanes
-        if learned_lane_extractor is not None:
+        lanes: list[LaneLine]
+        if lane_backend == "egolanes_onnx":
+            egolanes_lanes = None
+            if egolanes_extractor is not None:
+                egolanes_lanes = egolanes_extractor.extract(
+                    bundle.front_camera.frame,
+                    sensor_id=bundle.front_camera.sensor_id,
+                    ego_world_xyz=ego_xyz,
+                    ego_yaw_rad=ego_yaw,
+                    ego_yaw_rate_rad_s=ego_yaw_rate,
+                )
+            if egolanes_lanes is not None and len(egolanes_lanes) >= 2:
+                lanes = egolanes_lanes
+                bundle.metadata["lane_source"] = "egolanes"
+                bundle.metadata["lane_model_name"] = getattr(egolanes_extractor, "model_name", "EgoLanes")
+                if getattr(egolanes_extractor, "ran_inference_last_call", False):
+                    bundle.metadata["lane_inference_ms"] = egolanes_extractor.last_inference_ms
+            else:
+                lanes = _heuristic_lanes()
+                bundle.metadata["lane_source"] = "heuristic"
+                bundle.metadata["lane_fallback_reason"] = (
+                    getattr(egolanes_extractor, "load_error", None)
+                    or "invalid_egolanes_output"
+                )
+        elif lane_backend == "online_train" and learned_lane_extractor is not None:
+            heuristic_lanes = _heuristic_lanes()
+            lanes = heuristic_lanes
             learned_lanes = learned_lane_extractor.extract(
                 bundle.front_camera.frame,
                 sensor_id=bundle.front_camera.sensor_id,
@@ -527,7 +689,22 @@ class _CameraSceneContextMixin:
                 ):
                     bundle.metadata["lane_model_warmup"] = not learned_lane_extractor.is_trained
         else:
+            lanes = _heuristic_lanes()
             bundle.metadata.setdefault("lane_source", "heuristic")
+
+        # --- Depth estimation ---
+        bundle.metadata["depth_inference_ms"] = 0.0
+        if depth_estimator is not None:
+            depth_map = depth_estimator.extract(
+                bundle.front_camera.frame,
+                bundle.front_camera.sensor_id,
+            )
+            if depth_map is not None:
+                bundle.metadata["depth_map"] = {
+                    bundle.front_camera.sensor_id: depth_map,
+                }
+                if getattr(depth_estimator, "ran_inference_last_call", False):
+                    bundle.metadata["depth_inference_ms"] = depth_estimator.last_inference_ms
 
         return lanes, drivable_space
 
@@ -550,6 +727,8 @@ class PerceptionStack(_CameraSceneContextMixin):
         self.drivable_extractor = DrivableSpaceExtractor()
         self.learned_drivable_extractor = None
         self.learned_lane_extractor = None
+        self.egolanes_extractor = None
+        self.depth_estimator = None
         self.aux_policy = aux_policy or _PerceptionAuxPolicy()
         self.camera_budget_policy = camera_budget_policy or _PerceptionCameraBudgetPolicy()
         if enable_learned_perception:
@@ -557,15 +736,36 @@ class PerceptionStack(_CameraSceneContextMixin):
             if segformer_cls is not None and self.aux_policy.enable_segformer:
                 self.learned_drivable_extractor = segformer_cls(
                     device=device,
+                    model_name=self.aux_policy.segformer_model_name,
                     run_every_n_ticks=self.aux_policy.segformer_run_every_n_ticks,
                     max_input_long_edge_px=self.aux_policy.segformer_max_input_long_edge_px,
                 )
-            learned_lane_cls = _get_learned_lane_class()
+            if self.aux_policy.lane_backend == "online_train":
+                learned_lane_cls = _get_learned_lane_class()
+            else:
+                learned_lane_cls = None
             if learned_lane_cls is not None and self.aux_policy.enable_learned_lanes:
                 self.learned_lane_extractor = learned_lane_cls(
                     device=device,
                     run_every_n_ticks=self.aux_policy.lane_run_every_n_ticks,
                     allow_online_training=self.aux_policy.allow_online_lane_training,
+                )
+            if self.aux_policy.lane_backend == "egolanes_onnx":
+                egolanes_cls = _get_egolanes_class()
+                if egolanes_cls is not None:
+                    self.egolanes_extractor = egolanes_cls(
+                        device=device,
+                        model_path=self.aux_policy.egolanes_model_path,
+                        run_every_n_ticks=self.aux_policy.egolanes_run_every_n_ticks,
+                        confidence_threshold=self.aux_policy.egolanes_confidence_threshold,
+                        max_input_long_edge_px=self.aux_policy.egolanes_max_input_long_edge_px,
+                    )
+            depth_cls = _get_depth_estimator_class()
+            if depth_cls is not None and self.aux_policy.enable_depth:
+                self.depth_estimator = depth_cls(
+                    device=device,
+                    run_every_n_ticks=self.aux_policy.depth_run_every_n_ticks,
+                    max_input_long_edge_px=self.aux_policy.depth_max_input_long_edge_px,
                 )
         self.logger = get_logger(__name__, perception_mode="camera_v1")
         self._camera_order = ("front_camera", "left_camera", "right_camera", "rear_camera")
@@ -598,6 +798,9 @@ class PerceptionStack(_CameraSceneContextMixin):
                 drivable_extractor=self.drivable_extractor,
                 learned_drivable_extractor=self.learned_drivable_extractor,
                 learned_lane_extractor=self.learned_lane_extractor,
+                egolanes_extractor=self.egolanes_extractor,
+                aux_policy=self.aux_policy,
+                depth_estimator=self.depth_estimator,
             )
             status_summary = _build_perception_status(
                 active_mode="camera_v1",
@@ -982,6 +1185,7 @@ class PerceptionStack(_CameraSceneContextMixin):
                     source_modality=detection.source_modality,
                     source_sensor_ids=list(detection.source_sensor_ids or [detection.source_sensor_id]),
                     position_estimate_kind=detection.position_estimate_kind,
+                    position_uncertainty_m=getattr(detection, "position_uncertainty_m", 0.0),
                     gt_actor_id=detection.preferred_track_id,
                 )
             )
@@ -1109,6 +1313,8 @@ class FusedPerceptionStack(_CameraSceneContextMixin):
         self.drivable_extractor = self.camera_stack.drivable_extractor
         self.learned_drivable_extractor = self.camera_stack.learned_drivable_extractor
         self.learned_lane_extractor = self.camera_stack.learned_lane_extractor
+        self.egolanes_extractor = self.camera_stack.egolanes_extractor
+        self.aux_policy = self.camera_stack.aux_policy
         self.logger = get_logger(__name__, perception_mode="fused_v1")
 
     def run(
@@ -1124,15 +1330,23 @@ class FusedPerceptionStack(_CameraSceneContextMixin):
             camera_detections, traffic_lights, camera_fallback_state, active_camera_sensors, camera_detection_debug = (
                 self.camera_stack.detect_dynamic(bundle)
             )
+            if camera_fallback_state == "bootstrap":
+                bundle.metadata["perception_bootstrap_active"] = True
+                self.logger.warning("Perception using bootstrap (ground-truth) camera detections for tick %s", bundle.tick_id)
             lidar_detections = self.lidar_stack.detect_dynamic(bundle)
-            fused_objects = fuse_detections(camera_detections, lidar_detections)
-            canonical_objects = self._canonical_detections(camera_detections, fused_objects)
+            fused_objects, used_lidar_indices = fuse_detections(camera_detections, lidar_detections)
+            canonical_objects = self._canonical_detections(
+                camera_detections, fused_objects, lidar_detections, used_lidar_indices
+            )
             lanes, drivable_space = self._scene_context(
                 bundle,
                 lane_extractor=self.lane_extractor,
                 drivable_extractor=self.drivable_extractor,
                 learned_drivable_extractor=self.learned_drivable_extractor,
                 learned_lane_extractor=self.learned_lane_extractor,
+                egolanes_extractor=self.egolanes_extractor,
+                aux_policy=self.aux_policy,
+                depth_estimator=getattr(self.camera_stack, "depth_estimator", None),
             )
             status_summary = _build_perception_status(
                     active_mode="fused_v1",
@@ -1171,17 +1385,25 @@ class FusedPerceptionStack(_CameraSceneContextMixin):
         self,
         camera_detections: list[ObjectDetection],
         fused_detections: list[ObjectDetection],
+        lidar_detections: list[ObjectDetection] | None = None,
+        used_lidar_indices: set[int] | None = None,
     ) -> list[ObjectDetection]:
         actual_camera_detections = [
             detection for detection in camera_detections if str(detection.source_modality) == "camera"
         ]
         if not fused_detections:
-            return actual_camera_detections
-        canonical = list(fused_detections)
-        for detection in actual_camera_detections:
-            if any(self._camera_detection_is_represented(detection, fused) for fused in fused_detections):
-                continue
-            canonical.append(detection)
+            canonical = list(actual_camera_detections)
+        else:
+            canonical = list(fused_detections)
+            for detection in actual_camera_detections:
+                if any(self._camera_detection_is_represented(detection, fused) for fused in fused_detections):
+                    continue
+                canonical.append(detection)
+        # Recover unmatched LiDAR detections that were not fused with any camera detection.
+        if lidar_detections and used_lidar_indices is not None:
+            for idx, detection in enumerate(lidar_detections):
+                if idx not in used_lidar_indices:
+                    canonical.append(detection)
         return canonical
 
     def _camera_detection_is_represented(

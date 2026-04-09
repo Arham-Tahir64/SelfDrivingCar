@@ -4,6 +4,7 @@ import time
 from dataclasses import dataclass
 
 import math
+import re
 
 from autonomy_demo.common.exceptions import CarlaRuntimeError
 from autonomy_demo.common.logging import get_logger
@@ -679,10 +680,17 @@ class CarlaSimulationBackend(StubSimulationBackend):
     @staticmethod
     def _npc_target_speed_mps(behavior: str) -> float:
         behavior_key = behavior.strip().lower()
+        explicit_speed_match = re.search(r"(?:^|[_:@-])(speed|mps)[_:@-]?(\d+(?:\.\d+)?)$", behavior_key)
+        if explicit_speed_match is not None:
+            return max(float(explicit_speed_match.group(2)), 0.0)
         if behavior_key == "cross_traffic":
             return 6.0
         if behavior_key == "parked":
             return 0.0
+        if behavior_key.endswith("_aggressive"):
+            return 13.0
+        if behavior_key.endswith("_fast"):
+            return 11.0
         return 8.0
 
     def _update_npc_motion(self) -> None:

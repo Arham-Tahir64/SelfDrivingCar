@@ -4,6 +4,7 @@ import numpy as np
 
 from autonomy_demo.interfaces.enums import LaneLineType
 from autonomy_demo.interfaces.types import LaneLine
+from autonomy_demo.perception.internal_types import CameraSegmentationResult
 
 
 def _sensor_mount(sensor_id: str) -> tuple[np.ndarray, float]:
@@ -84,13 +85,14 @@ class LaneExtractor:
         ego_world_xyz: np.ndarray | None = None,
         ego_yaw_rad: float = 0.0,
         ego_yaw_rate_rad_s: float = 0.0,
+        segmentation_priors: CameraSegmentationResult | None = None,
     ) -> list[LaneLine]:
         image = np.asarray(frame, dtype=np.uint8)
         if image.ndim != 3:
             return []
         image_height, image_width = image.shape[:2]
         suppress_temporal_smoothing = self._update_turn_smoothing_state(ego_yaw_rate_rad_s)
-        left_lane, right_lane = self._extract_with_opencv(image)
+        left_lane, right_lane = self._extract_with_opencv(image, segmentation_priors=segmentation_priors)
         left_lane, right_lane = self._sanitize_lane_pair(left_lane, right_lane, image_width)
         left_lane, right_lane = self._recover_lane_pair(
             left_lane,
@@ -293,16 +295,27 @@ class LaneExtractor:
         lateral_centering = 1.0 - min(abs(float(np.mean(polyline[:, 0]) / max(image_width, 1.0) - 0.5)), 0.5) * 2.0
         return float(np.clip(0.45 + (vertical_coverage * 0.35) + (lateral_centering * 0.2), 0.0, 0.99))
 
-    def _extract_with_opencv(self, image: np.ndarray) -> tuple[np.ndarray | None, np.ndarray | None]:
+    def _extract_with_opencv(
+        self,
+        image: np.ndarray,
+        *,
+        segmentation_priors: CameraSegmentationResult | None = None,
+    ) -> tuple[np.ndarray | None, np.ndarray | None]:
         try:
             import cv2  # type: ignore
         except Exception:  # pragma: no cover - optional dependency path
             return None, None
 
-        binary = self._lane_binary_mask(image, cv2)
+        binary = self._lane_binary_mask(image, cv2, segmentation_priors=segmentation_priors)
         return self._extract_with_sliding_windows(binary)
 
-    def _lane_binary_mask(self, image: np.ndarray, cv2) -> np.ndarray:  # noqa: ANN001
+    def _lane_binary_mask(
+        self,
+        image: np.ndarray,
+        cv2,  # noqa: ANN001
+        *,
+        segmentation_priors: CameraSegmentationResult | None = None,
+    ) -> np.ndarray:
         hls = cv2.cvtColor(image, cv2.COLOR_RGB2HLS)
         gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
         white_mask = cv2.inRange(
@@ -331,8 +344,38 @@ class LaneExtractor:
         )
         cv2.fillPoly(mask, polygon, 255)
         cropped = cv2.bitwise_and(blurred, mask)
+        if segmentation_priors is not None:
+            prior_mask = self._segmentation_lane_prior(
+                segmentation_priors,
+                image_shape=image.shape,
+                cv2=cv2,
+            )
+            cropped = np.maximum(cropped, prior_mask)
         _, binary = cv2.threshold(cropped, 145, 255, cv2.THRESH_BINARY)
         return binary
+
+    def _segmentation_lane_prior(
+        self,
+        segmentation_priors: CameraSegmentationResult,
+        *,
+        image_shape: tuple[int, int, int],
+        cv2,  # noqa: ANN001
+    ) -> np.ndarray:
+        height, width = image_shape[:2]
+        lane_boundary = np.asarray(segmentation_priors.lane_boundary_prob, dtype=np.float32)
+        drivable = np.asarray(segmentation_priors.drivable_prob, dtype=np.float32)
+        curb = np.asarray(segmentation_priors.curb_boundary_prob, dtype=np.float32)
+        if lane_boundary.shape != (height, width) or drivable.shape != (height, width):
+            return np.zeros((height, width), dtype=np.uint8)
+        lane_signal = np.clip(
+            (lane_boundary * 0.75) + (np.maximum(drivable_centerline_hint(drivable), 0.0) * 0.35),
+            0.0,
+            1.0,
+        )
+        drivable_window = cv2.GaussianBlur((drivable * 255.0).astype(np.uint8), (7, 7), 0)
+        lane_signal = (lane_signal * (drivable_window.astype(np.float32) / 255.0)).astype(np.float32)
+        lane_signal = np.clip(lane_signal - (curb * 0.25), 0.0, 1.0)
+        return (lane_signal * 255.0).astype(np.uint8)
 
     def _extract_with_sliding_windows(self, binary: np.ndarray) -> tuple[np.ndarray | None, np.ndarray | None]:
         height, width = binary.shape
@@ -413,3 +456,16 @@ class LaneExtractor:
         if width_variation > image_width * 0.35:
             return None, None
         return left_lane, right_lane
+
+
+def drivable_centerline_hint(drivable_prob: np.ndarray) -> np.ndarray:
+    drivable = np.asarray(drivable_prob, dtype=np.float32)
+    if drivable.ndim != 2:
+        return np.zeros_like(drivable, dtype=np.float32)
+    left = np.roll(drivable, 1, axis=1)
+    right = np.roll(drivable, -1, axis=1)
+    center_hint = np.clip((drivable - np.abs(left - right)) * 1.15, 0.0, 1.0)
+    center_hint[:, 0] = 0.0
+    center_hint[:, -1] = 0.0
+    center_hint[: int(center_hint.shape[0] * 0.4), :] = 0.0
+    return center_hint.astype(np.float32)

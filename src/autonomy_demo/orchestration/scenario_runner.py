@@ -28,8 +28,9 @@ from autonomy_demo.sensors.sensor_manager import SensorManager
 from autonomy_demo.visualization.composite import CompositeVisualizationSink
 from autonomy_demo.sim.backends import CarlaSimulationBackend, StubSimulationBackend
 from autonomy_demo.visualization.service import NullVisualizationService
-from autonomy_demo.visualization.websocket_bridge import WebSocketBridge
-from autonomy_demo.visualization.server import start_server_thread
+from autonomy_demo.visualization.pygame_lidar_view import PygameLidarVisualizationService
+
+
 
 
 @dataclass(slots=True)
@@ -123,6 +124,9 @@ class ScenarioRunner:
         replay_writer = Hdf5OrJsonReplayWriter(self.output_dir) if record else None
         visualization_sinks = []
         if visualize:
+            from autonomy_demo.visualization.websocket_bridge import WebSocketBridge
+            from autonomy_demo.visualization.server import start_server_thread
+
             bridge = WebSocketBridge()
             start_server_thread(
                 bridge,
@@ -132,7 +136,7 @@ class ScenarioRunner:
             visualization_sinks.append(bridge)
             visualization_sinks.append(NullVisualizationService(enabled=True, output_dir=self.output_dir))
         if lidar_view:
-            self.logger.info("Ignoring lidar_view request for local Pygame windows; use the dashboard/websocket view instead.")
+            visualization_sinks.append(PygameLidarVisualizationService(output_dir=self.output_dir))
 
         if not visualization_sinks:
             visualization = NullVisualizationService(enabled=False, output_dir=self.output_dir)
@@ -154,10 +158,12 @@ class ScenarioRunner:
                 k: v for k, v in behavior_tuning.items()
                 if k in RuleBasedBehaviorPlanner.__init__.__code__.co_varnames
             }) if behavior_tuning else RuleBasedBehaviorPlanner()
-            motion_planner = FrenetMotionPlanner(**{
+            planning_kwargs = {
                 k: v for k, v in planning_tuning.items()
                 if k in FrenetMotionPlanner.__init__.__code__.co_varnames
-            }) if planning_tuning else FrenetMotionPlanner()
+            } if planning_tuning else {}
+            planning_kwargs["lane_graph_provider"] = lane_graph_provider
+            motion_planner = FrenetMotionPlanner(**planning_kwargs)
             controller = RouteFollowerController(**{
                 k: v for k, v in control_tuning.items()
                 if k in RouteFollowerController.__init__.__code__.co_varnames

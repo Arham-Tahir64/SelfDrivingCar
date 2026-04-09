@@ -114,6 +114,7 @@ class ObjectDetection:
     source_modality: str = "bootstrap"
     source_sensor_ids: list[str] = field(default_factory=list)
     position_estimate_kind: str = "truth_fallback"
+    position_uncertainty_m: float = 0.0
     gt_actor_id: int | None = None  # CARLA actor ID for MOT evaluation
 
     def __post_init__(self) -> None:
@@ -194,6 +195,32 @@ class DrivableSpaceMask:
         self.class_probabilities = _float_array(self.class_probabilities)
         if self.mask.ndim != 2:
             raise ValueError("mask must be HxW")
+
+
+@dataclass(slots=True)
+class SemanticSegMap:
+    """Full semantic segmentation label map (e.g. Cityscapes 19-class)."""
+
+    label_map: NDArray[np.uint8]
+    source_sensor_id: str
+
+    def __post_init__(self) -> None:
+        self.label_map = np.asarray(self.label_map, dtype=np.uint8)
+        if self.label_map.ndim != 2:
+            raise ValueError("label_map must be HxW")
+
+
+@dataclass(slots=True)
+class DepthMap:
+    """Monocular depth estimate (relative inverse depth, higher = closer)."""
+
+    depth: FloatArray
+    source_sensor_id: str
+
+    def __post_init__(self) -> None:
+        self.depth = _float_array(self.depth)
+        if self.depth.ndim != 2:
+            raise ValueError("depth must be HxW")
 
 
 @dataclass(slots=True)

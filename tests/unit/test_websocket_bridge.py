@@ -355,7 +355,7 @@ def test_bootstrap_envelope_merges_retained_dynamic_and_heavy_topics(monkeypatch
     assert TopicName.VISUALIZATION_WORLD_LAYER.value in topics
     assert "traffic_lights" in topics[TopicName.VISUALIZATION_WORLD_LAYER.value]
     assert TopicName.VISUALIZATION_LIDAR_PREVIEW.value in topics
-    assert len(topics[TopicName.VISUALIZATION_LIDAR_PREVIEW.value]["points"]) == 300
+    assert len(topics[TopicName.VISUALIZATION_LIDAR_PREVIEW.value]["points"]) == 1000
     lidar_preview = topics[TopicName.VISUALIZATION_LIDAR_PREVIEW.value]
     assert len(lidar_preview["objects"]) == 2
     assert {obj["track_id"] for obj in lidar_preview["objects"]} == {7, 8}
@@ -391,6 +391,57 @@ def test_register_queues_immediate_bootstrap_before_first_tick(monkeypatch) -> N
     assert TopicName.VISUALIZATION_PRIOR_MAP.value in envelope["topics"]
     assert TopicName.VISUALIZATION_WORLD_LAYER.value in envelope["topics"]
     assert TopicName.VISUALIZATION_LIDAR_PREVIEW.value in envelope["topics"]
+
+
+def test_lidar_preview_filters_to_panel_roi_before_capping(monkeypatch) -> None:
+    bus = InProcessEventBus()
+    bridge = WebSocketBridge()
+    bridge.attach(bus)
+    queued = _capture_envelopes(bridge)
+    _publish_common(bus)
+    bus.publish(
+        TopicName.SENSOR_LIDAR.value,
+        LidarFrame(
+            points_xyz=np.vstack(
+                [
+                    np.stack(
+                        [
+                            np.linspace(0.0, 40.0, 1800, dtype=np.float32),
+                            np.linspace(-10.0, 10.0, 1800, dtype=np.float32),
+                            np.zeros(1800, dtype=np.float32),
+                        ],
+                        axis=1,
+                    ),
+                    np.stack(
+                        [
+                            np.linspace(55.0, 80.0, 800, dtype=np.float32),
+                            np.linspace(-5.0, 5.0, 800, dtype=np.float32),
+                            np.zeros(800, dtype=np.float32),
+                        ],
+                        axis=1,
+                    ),
+                    np.stack(
+                        [
+                            np.linspace(5.0, 25.0, 400, dtype=np.float32),
+                            np.linspace(55.0, 70.0, 400, dtype=np.float32),
+                            np.zeros(400, dtype=np.float32),
+                        ],
+                        axis=1,
+                    ),
+                ]
+            ),
+            timestamp_s=0.0,
+        ),
+    )
+
+    monkeypatch.setattr("autonomy_demo.visualization.websocket_bridge.time.monotonic", lambda: 16.0)
+    bridge.register(object())
+
+    lidar_preview = queued[-1]["topics"][TopicName.VISUALIZATION_LIDAR_PREVIEW.value]
+    assert len(lidar_preview["points"]) == 1500
+    assert lidar_preview["status"]["point_count"] == 1500
+    assert all(-8.0 <= point[0] <= 50.0 for point in lidar_preview["points"])
+    assert all(abs(point[1]) <= 50.0 for point in lidar_preview["points"])
 
 
 def test_world_layer_static_updates_only_when_signature_changes(monkeypatch) -> None:

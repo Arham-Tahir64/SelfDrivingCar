@@ -23,6 +23,7 @@ class FrameDetection2D:
     world_bbox_3d: FloatArray | None = None
     velocity_xyz: FloatArray | None = None
     world_xyz: FloatArray | None = None
+    position_uncertainty_m: float = 0.0
     preferred_track_id: int | None = None
     traffic_light_state: TrafficLightState | None = None
 
@@ -50,3 +51,26 @@ class TrackedLidarClusterDetection(LidarClusterDetection):
     track_id: int = -1
     track_state: TrackState = TrackState.TENTATIVE
     velocity_xyz: FloatArray | None = None
+
+
+@dataclass(slots=True)
+class CameraSegmentationResult:
+    semantic_label_map: NDArray[np.uint8]
+    task_label_map: NDArray[np.uint8]
+    task_probabilities: FloatArray
+    drivable_prob: FloatArray
+    lane_boundary_prob: FloatArray
+    curb_boundary_prob: FloatArray
+    uncertainty: FloatArray
+    source_sensor_id: str
+    model_name: str
+    model_version: str
+    source_frame_id: int | None = None
+    source_tick_id: int | None = None
+    source_sim_time_s: float | None = None
+    source_ego_world_xyz: FloatArray | None = None
+    source_ego_yaw_rad: float = 0.0
+    camera_calibration: dict[str, object] | None = None
+    reprojected: bool = False
+    warped_from_frame_id: int | None = None
+    warped_from_tick_id: int | None = None

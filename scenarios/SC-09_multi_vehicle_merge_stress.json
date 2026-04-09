@@ -1,0 +1,49 @@
+{
+  "scenario_id": "SC-09",
+  "name": "Multi-Vehicle Merge Stress",
+  "map": "Town04",
+  "ego_spawn": { "x": 50.0, "y": 20.0, "yaw": 0.0 },
+  "ego_goal": { "x": 240.0, "y": 24.0 },
+  "max_duration_s": 120,
+  "npcs": [
+    {
+      "model": "vehicle.audi.a2",
+      "behavior": "parked",
+      "spawn": { "x": 72.0, "y": 20.0, "yaw": 0.0 },
+      "route": [{ "x": 74.0, "y": 20.0 }]
+    },
+    {
+      "model": "vehicle.lincoln.mkz_2020",
+      "behavior": "highway_flow_speed_13",
+      "spawn": { "x": 34.0, "y": 24.0, "yaw": 0.0 },
+      "route": [{ "x": 270.0, "y": 24.0 }]
+    },
+    {
+      "model": "vehicle.tesla.model3",
+      "behavior": "highway_flow_speed_12",
+      "spawn": { "x": 56.0, "y": 24.0, "yaw": 0.0 },
+      "route": [{ "x": 270.0, "y": 24.0 }]
+    },
+    {
+      "model": "vehicle.mercedes.coupe",
+      "behavior": "highway_flow_speed_11",
+      "spawn": { "x": 78.0, "y": 24.0, "yaw": 0.0 },
+      "route": [{ "x": 270.0, "y": 24.0 }]
+    },
+    {
+      "model": "vehicle.nissan.micra",
+      "behavior": "highway_flow_speed_12",
+      "spawn": { "x": 98.0, "y": 24.0, "yaw": 0.0 },
+      "route": [{ "x": 270.0, "y": 24.0 }]
+    }
+  ],
+  "props": [],
+  "triggers": [
+    { "type": "merge_required", "at_s": 40.0, "lane_id": 1 },
+    { "type": "lane_closure", "at_s": 55.0, "lane_id": 1 }
+  ],
+  "eval": {
+    "min_completion_rate": 0.80,
+    "max_collisions": 0
+  }
+}

@@ -70,7 +70,7 @@ class LaneAwarePredictionModule:
         velocity = np.asarray(agent.velocity, dtype=np.float32)
         speed_mps = float(np.linalg.norm(velocity[:2]))
         if speed_mps <= 0.1:
-            speed_mps = 2.0
+            return self._predict_stationary(center_xyz, velocity)
 
         lane_match = self._nearest_lane(local_map.static_lanes, center_xyz)
         lane_speed = (
@@ -85,6 +85,37 @@ class LaneAwarePredictionModule:
         return self._predict_lane_following(
             lane_match, center_xyz, speed_mps, lane_speed
         )
+
+    def _predict_stationary(
+        self,
+        center_xyz: np.ndarray,
+        velocity: np.ndarray,
+    ) -> tuple[list[Waypoint], list[float], list[FloatArray]]:
+        """Predict a stopped agent as remaining in place with growing uncertainty."""
+        heading = float(np.arctan2(float(velocity[1]), float(velocity[0]) + 1e-6))
+        x = float(center_xyz[0])
+        y = float(center_xyz[1])
+        trajectory: list[Waypoint] = []
+        confidence: list[float] = []
+        covariance: list[FloatArray] = []
+
+        for step in range(self.num_steps):
+            t = step * self.dt_s
+            trajectory.append(
+                Waypoint(x=x, y=y, yaw=heading, velocity=0.0, timestamp=t)
+            )
+            # High confidence initially — agent is observed stopped — but decays
+            # because it might start moving at any moment.
+            conf = max(0.2, 0.95 - 0.012 * step)
+            confidence.append(conf)
+
+            # Uncertainty grows to account for possible departure from rest.
+            sigma = self.sigma_lat_base + self.sigma_lat_growth * step
+            covariance.append(
+                np.array([[sigma**2, 0.0], [0.0, sigma**2]], dtype=np.float32)
+            )
+
+        return trajectory, confidence, covariance
 
     def _predict_constant_velocity(
         self,

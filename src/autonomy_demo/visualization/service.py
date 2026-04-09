@@ -9,7 +9,7 @@ import numpy as np
 from autonomy_demo.common.logging import get_logger
 from autonomy_demo.common.paths import ensure_directory
 from autonomy_demo.interfaces.enums import TopicName
-from autonomy_demo.interfaces.types import CameraFrame, ControlCommand, DrivableSpaceMask, EgoPose, EgoTrajectory, LaneLine, LocalMap, ObjectDetection, TrafficLightDetection
+from autonomy_demo.interfaces.types import CameraFrame, ControlCommand, DepthMap, DrivableSpaceMask, EgoPose, EgoTrajectory, LaneLine, LocalMap, ObjectDetection, SemanticSegMap, TrafficLightDetection
 
 
 def _has_image_bbox(bbox_xyxy: np.ndarray | None) -> bool:
@@ -32,6 +32,8 @@ class NullVisualizationService:
         self._latest_lanes: list[LaneLine] = []
         self._latest_traffic_lights: list[TrafficLightDetection] = []
         self._latest_drivable: DrivableSpaceMask | None = None
+        self._latest_semantic_seg: SemanticSegMap | None = None
+        self._latest_depth: DepthMap | None = None
         self._latest_ego_pose: EgoPose | None = None
         self._latest_local_map: LocalMap | None = None
         self._latest_trajectory: EgoTrajectory | None = None
@@ -58,6 +60,10 @@ class NullVisualizationService:
             self._latest_traffic_lights = [item for item in payload if isinstance(item, TrafficLightDetection)]
         elif topic == TopicName.PERCEPTION_DRIVABLE_SPACE.value and isinstance(payload, DrivableSpaceMask):
             self._latest_drivable = payload
+        elif topic == TopicName.PERCEPTION_SEMANTIC_SEG.value and isinstance(payload, SemanticSegMap):
+            self._latest_semantic_seg = payload
+        elif topic == TopicName.PERCEPTION_DEPTH.value and isinstance(payload, DepthMap):
+            self._latest_depth = payload
         elif topic == TopicName.LOCALIZATION_EGO_POSE.value and isinstance(payload, EgoPose):
             self._latest_ego_pose = payload
         elif topic == TopicName.MAP_LOCAL_MAP.value and isinstance(payload, LocalMap):
@@ -87,10 +93,20 @@ class NullVisualizationService:
             import cv2  # type: ignore
         except Exception:  # pragma: no cover - optional dependency path
             return frame
-        if self._latest_drivable is not None and self._latest_drivable.mask.shape[:2] == frame.shape[:2]:
+        if self._latest_semantic_seg is not None and self._latest_semantic_seg.label_map.shape[:2] == frame.shape[:2]:
+            # Full semantic segmentation overlay
+            try:
+                from autonomy_demo.perception.cityscapes_palette import CITYSCAPES_PALETTE
+                color_map = CITYSCAPES_PALETTE[self._latest_semantic_seg.label_map]  # (H, W, 3)
+                alpha = 0.45
+                frame = ((1.0 - alpha) * frame + alpha * color_map).astype(np.uint8)
+            except Exception:
+                pass
+        elif self._latest_drivable is not None and self._latest_drivable.mask.shape[:2] == frame.shape[:2]:
+            # Fallback: binary cyan drivable mask for better separation from warm curb/boundary tones
             overlay = frame.copy()
             overlay[self._latest_drivable.mask] = (
-                0.7 * overlay[self._latest_drivable.mask] + np.array([0, 60, 0], dtype=np.uint8)
+                0.64 * overlay[self._latest_drivable.mask] + np.array([18, 96, 118], dtype=np.uint8)
             )
             frame = overlay.astype(np.uint8)
         for detection in self._latest_detections:
@@ -162,6 +178,24 @@ class NullVisualizationService:
                     1,
                     cv2.LINE_AA,
                 )
+        # Depth minimap in top-right corner
+        if self._latest_depth is not None and self._latest_depth.depth.shape[:2] == frame.shape[:2]:
+            depth_u8 = (self._latest_depth.depth * 255).astype(np.uint8)
+            depth_colored = cv2.applyColorMap(depth_u8, cv2.COLORMAP_TURBO)  # BGR
+            depth_colored = depth_colored[:, :, ::-1]  # to RGB
+            mini_h, mini_w = frame.shape[0] // 4, frame.shape[1] // 4
+            depth_mini = cv2.resize(depth_colored, (mini_w, mini_h), interpolation=cv2.INTER_AREA)
+            margin = 10
+            y0, y1 = margin, margin + mini_h
+            x0, x1 = frame.shape[1] - mini_w - margin, frame.shape[1] - margin
+            frame[y0:y1, x0:x1] = depth_mini
+            # Border + label
+            cv2.rectangle(frame, (x0 - 1, y0 - 1), (x1, y1), (255, 255, 255), 1)
+            cv2.putText(
+                frame, "DEPTH", (x0 + 4, y0 + 14),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA,
+            )
+
         try:
             cv2.imshow("autonomy_demo/perception", frame[:, :, ::-1])
             cv2.waitKey(1)

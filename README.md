@@ -55,6 +55,8 @@ python scripts/replay_scenario.py --replay outputs/latest/replay.json
 - Set `perception.model_variant` to your trained YOLO weights path to activate the YOLO adapter when `ultralytics` is installed.
 - You can override perception at runtime with `--perception-mode`, `--perception-device`, and `--perception-model-variant`.
 - Lane and drivable-space extraction use lightweight image heuristics with OpenCV acceleration when available.
+- `tuning.perception_aux.lane_backend: egolanes_onnx` enables Autoware EgoLanes lane inference when `onnxruntime` is installed and `tuning.perception_aux.egolanes_model_path` points to the downloaded `.onnx` weights.
+- Supported lane backends are `heuristic`, `online_train`, and `egolanes_onnx`. Heuristic remains the fallback path when EgoLanes cannot load or returns an incomplete ego-lane pair.
 
 ## Next Implementation Steps
 

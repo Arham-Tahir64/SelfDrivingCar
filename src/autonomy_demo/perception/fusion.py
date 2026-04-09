@@ -26,7 +26,7 @@ def fuse_detections(
     *,
     match_distance_m: float = 5.0,
     camera_class_confidence_threshold: float = 0.75,
-) -> list[ObjectDetection]:
+) -> tuple[list[ObjectDetection], set[int]]:
     fused: list[ObjectDetection] = []
     used_camera_indices: set[int] = set()
     used_lidar_indices: set[int] = set()
@@ -85,4 +85,4 @@ def fuse_detections(
         used_camera_indices.add(camera_index)
         used_lidar_indices.add(lidar_index)
 
-    return fused
+    return fused, used_lidar_indices

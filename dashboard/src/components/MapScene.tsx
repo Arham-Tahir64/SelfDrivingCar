@@ -80,7 +80,9 @@ export default function MapScene() {
   return (
     <>
       <color attach="background" args={["#07090c"]} />
-      <ambientLight intensity={0.95} />
+      <ambientLight intensity={0.72} />
+      <hemisphereLight args={["#9ed6ff", "#05070d", 0.48]} />
+      <directionalLight position={[40, 120, 35]} intensity={0.58} color="#eef6ff" />
       <MapCameraController />
       <PriorMapSurface />
       <RoadCorridorSurface />

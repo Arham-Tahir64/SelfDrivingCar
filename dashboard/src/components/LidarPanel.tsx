@@ -1,4 +1,6 @@
-import { useRef, useEffect } from "react";
+import type { CSSProperties } from "react";
+import { useEffect, useRef } from "react";
+import PanelHeader from "./PanelHeader";
 import { useFrameStore } from "../store/frameStore";
 import type { LidarPanelObject } from "../utils/types";
 
@@ -6,7 +8,7 @@ const CANVAS_W = 400;
 const CANVAS_H = 300;
 const RANGE_M = 50;
 const EGO_Y = CANVAS_H * 0.76;
-const POINT_RADIUS = 1.0;
+const POINT_RADIUS = 1.4;
 
 function toCanvas(forwardM: number, lateralM: number): [number, number] {
   const x = CANVAS_W / 2 + (lateralM / RANGE_M) * (CANVAS_W / 2);
@@ -164,7 +166,7 @@ export default function LidarPanel() {
         const z = point[2] ?? 0;
         if (forwardM < -8 || forwardM > RANGE_M || Math.abs(lateralM) > RANGE_M) continue;
         const [x, y] = toCanvas(forwardM, lateralM);
-        const alpha = Math.max(0.18, Math.min(0.42, 0.24 + ((z + 1.0) * 0.03)));
+        const alpha = Math.max(0.26, Math.min(0.58, 0.32 + ((z + 1.0) * 0.04)));
         ctx.fillStyle = `rgba(95, 183, 255, ${alpha})`;
         ctx.beginPath();
         ctx.arc(x, y, POINT_RADIUS, 0, Math.PI * 2);
@@ -255,57 +257,57 @@ export default function LidarPanel() {
 
   return (
     <div style={styles.container}>
-      <div style={styles.label}>LIDAR — PERCEPTION</div>
-      <div
-        style={{
-          ...styles.badge,
-          color: degraded ? "#FF8A80" : "#8CEBFF",
-          borderColor: degraded ? "#FF8A80" : "#2AC7E3",
-          backgroundColor: degraded ? "#FF8A8022" : "#2AC7E322",
-        }}
-      >
-        {degraded ? `${modeLabel} DEGRADED` : modeLabel}
+      <PanelHeader
+        title="Lidar"
+        accentColor="#FFB300"
+        rightContent={
+          <div
+            style={{
+              ...styles.badge,
+              color: degraded ? "#FFD2CC" : "#FFF3C2",
+              borderColor: degraded ? "rgba(255,138,128,0.55)" : "rgba(255,179,0,0.42)",
+              backgroundColor: degraded ? "rgba(255,138,128,0.16)" : "rgba(255,179,0,0.14)",
+            }}
+          >
+            {degraded ? `${modeLabel} DEGRADED` : modeLabel}
+          </div>
+        }
+      />
+      <div style={styles.content}>
+        <canvas ref={canvasRef} width={CANVAS_W} height={CANVAS_H} style={styles.canvas} />
+        <div style={styles.rangeLabel}>{RANGE_M}m forward range</div>
       </div>
-      <canvas ref={canvasRef} width={CANVAS_W} height={CANVAS_H} style={styles.canvas} />
-      <div style={styles.rangeLabel}>{RANGE_M}m forward range</div>
     </div>
   );
 }
 
-const styles: Record<string, React.CSSProperties> = {
+const styles: Record<string, CSSProperties> = {
   container: {
     width: "100%",
     height: "100%",
     backgroundColor: "#091019",
     borderLeft: "1px solid #1e2a3b",
-    position: "relative",
     overflow: "hidden",
+    display: "flex",
+    flexDirection: "column",
+  },
+  content: {
+    position: "relative",
+    flex: 1,
+    minHeight: 0,
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
   },
-  label: {
-    position: "absolute",
-    top: 8,
-    left: 12,
-    color: "#FFB300",
-    fontSize: 10,
-    fontWeight: 700,
-    letterSpacing: 1.2,
-    zIndex: 1,
-    textShadow: "0 1px 4px rgba(0,0,0,0.8)",
-  },
   badge: {
-    position: "absolute",
-    top: 24,
-    left: 12,
     padding: "3px 8px",
     borderRadius: 999,
     border: "1px solid",
     fontSize: 9,
     fontWeight: 700,
-    letterSpacing: 0.5,
-    zIndex: 1,
+    letterSpacing: "0.08em",
+    lineHeight: 1.1,
+    textTransform: "uppercase",
   },
   canvas: {
     width: "100%",
