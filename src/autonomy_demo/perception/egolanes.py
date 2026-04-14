@@ -24,7 +24,7 @@ class EgoLanesExtractor:
         device: str = "cuda",
         model_path: str,
         run_every_n_ticks: int = 1,
-        confidence_threshold: float = 0.45,
+        confidence_threshold: float = 0.30,
         max_input_long_edge_px: int | None = None,
         smoothing_alpha: float = 0.55,
         turn_smoothing_disable_yaw_rate_rad_s: float = 0.20,
@@ -303,7 +303,7 @@ class EgoLanesExtractor:
             return None
 
         weighted = lane_probability * self._side_prior(width, height, side)
-        binary = weighted >= self._confidence_threshold
+        binary = lane_probability >= self._confidence_threshold
         binary = self._clean_binary_mask(binary)
         if not np.any(binary):
             return None

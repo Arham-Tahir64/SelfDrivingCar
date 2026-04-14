@@ -54,10 +54,10 @@ def _egolanes_output(
     include_right: bool = True,
 ) -> np.ndarray:
     output = np.zeros((1, 3, height, width), dtype=np.float32)
-    output[:, 2, :, :] = -2.0
-    output[:, 0, int(height * 0.45) :, 12:17] = 6.0
+    output[:, 2, :, :] = 4.0
+    output[:, 0, int(height * 0.45) :, 12:17] = 8.0
     if include_right:
-        output[:, 1, int(height * 0.45) :, 31:36] = 6.0
+        output[:, 1, int(height * 0.45) :, 31:36] = 8.0
     return output
 
 def test_segformer_extractor_loads_and_runs() -> None:

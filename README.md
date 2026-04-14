@@ -57,6 +57,7 @@ python scripts/replay_scenario.py --replay outputs/latest/replay.json
 - Lane and drivable-space extraction use lightweight image heuristics with OpenCV acceleration when available.
 - `tuning.perception_aux.lane_backend: egolanes_onnx` enables Autoware EgoLanes lane inference when `onnxruntime` is installed and `tuning.perception_aux.egolanes_model_path` points to the downloaded `.onnx` weights.
 - Supported lane backends are `heuristic`, `online_train`, and `egolanes_onnx`. Heuristic remains the fallback path when EgoLanes cannot load or returns an incomplete ego-lane pair.
+- EgoLanes works best in this repo with `tuning.perception_aux.egolanes_confidence_threshold: 0.30`; higher thresholds can suppress valid ego-lane masks in urban scenes.
 
 ## Next Implementation Steps
 

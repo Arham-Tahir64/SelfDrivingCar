@@ -89,5 +89,5 @@ tuning:
     # downloaded Autoware EgoLanes ONNX weights to enable the model.
     egolanes_model_path: ""
     egolanes_run_every_n_ticks: 1
-    egolanes_confidence_threshold: 0.45
+    egolanes_confidence_threshold: 0.30
     egolanes_max_input_long_edge_px: 640

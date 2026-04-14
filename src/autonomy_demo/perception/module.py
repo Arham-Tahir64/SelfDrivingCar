@@ -63,7 +63,7 @@ class _PerceptionAuxPolicy:
     lane_backend: str = "heuristic"
     egolanes_model_path: str = ""
     egolanes_run_every_n_ticks: int = 1
-    egolanes_confidence_threshold: float = 0.45
+    egolanes_confidence_threshold: float = 0.30
     egolanes_max_input_long_edge_px: int | None = None
 
 
@@ -1399,11 +1399,18 @@ class FusedPerceptionStack(_CameraSceneContextMixin):
                 if any(self._camera_detection_is_represented(detection, fused) for fused in fused_detections):
                     continue
                 canonical.append(detection)
-        # Recover unmatched LiDAR detections that were not fused with any camera detection.
+        # Recover unmatched LiDAR detections — only keep confirmed tracks with
+        # sufficient confidence to avoid promoting static environment clusters
+        # (poles, walls, trees) as phantom dynamic objects.
         if lidar_detections and used_lidar_indices is not None:
             for idx, detection in enumerate(lidar_detections):
-                if idx not in used_lidar_indices:
-                    canonical.append(detection)
+                if idx in used_lidar_indices:
+                    continue
+                if detection.track_state != TrackState.CONFIRMED:
+                    continue
+                if detection.confidence < 0.55:
+                    continue
+                canonical.append(detection)
         return canonical
 
     def _camera_detection_is_represented(

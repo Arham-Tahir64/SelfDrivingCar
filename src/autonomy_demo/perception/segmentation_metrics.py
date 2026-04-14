@@ -12,6 +12,26 @@ from autonomy_demo.perception.segmentation_tasks import (
 )
 
 
+def _resize_label_map_nearest(label_map: np.ndarray, target_shape: tuple[int, int]) -> np.ndarray:
+    labels = np.asarray(label_map, dtype=np.uint8)
+    if labels.shape == target_shape:
+        return labels
+    target_height, target_width = target_shape
+    try:
+        import cv2  # type: ignore
+
+        return cv2.resize(
+            labels,
+            (int(target_width), int(target_height)),
+            interpolation=cv2.INTER_NEAREST,
+        ).astype(np.uint8)
+    except Exception:
+        source_height, source_width = labels.shape[:2]
+        y_indices = np.linspace(0, source_height - 1, target_height).astype(np.int32)
+        x_indices = np.linspace(0, source_width - 1, target_width).astype(np.int32)
+        return labels[y_indices[:, None], x_indices[None, :]].astype(np.uint8)
+
+
 def binary_iou(pred_mask: np.ndarray, target_mask: np.ndarray) -> float:
     pred = np.asarray(pred_mask, dtype=np.bool_)
     target = np.asarray(target_mask, dtype=np.bool_)
@@ -80,8 +100,8 @@ def summarize_segmentation_metrics(
     segmentation: CameraSegmentationResult,
     target_task_labels: np.ndarray,
 ) -> dict[str, float]:
-    target_labels = np.asarray(target_task_labels, dtype=np.uint8)
     pred_labels = np.asarray(segmentation.task_label_map, dtype=np.uint8)
+    target_labels = _resize_label_map_nearest(np.asarray(target_task_labels, dtype=np.uint8), pred_labels.shape)
     pred_drivable = np.asarray(segmentation.drivable_prob >= 0.5, dtype=np.bool_)
     target_drivable = (target_labels == TASK_DRIVABLE) | (target_labels == TASK_LANE_MARKING)
     target_lane_boundary, target_curb_boundary = derive_boundary_targets(target_labels)

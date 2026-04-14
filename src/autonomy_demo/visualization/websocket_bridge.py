@@ -20,6 +20,7 @@ _WS_TOPICS = frozenset(
     {
         TopicName.LOCALIZATION_EGO_POSE.value,
         TopicName.PERCEPTION_DETECTIONS.value,
+        TopicName.PERCEPTION_LANES.value,
         TopicName.PERCEPTION_TRAFFIC_LIGHTS.value,
         TopicName.PERCEPTION_STATUS.value,
         TopicName.MAP_LOCAL_MAP.value,
@@ -689,6 +690,7 @@ class WebSocketBridge:
         for topic in (
             TopicName.LOCALIZATION_EGO_POSE.value,
             TopicName.PERCEPTION_DETECTIONS.value,
+            TopicName.PERCEPTION_LANES.value,
             TopicName.PERCEPTION_TRAFFIC_LIGHTS.value,
             TopicName.PERCEPTION_STATUS.value,
             TopicName.CONTROL_VEHICLE_COMMAND.value,
