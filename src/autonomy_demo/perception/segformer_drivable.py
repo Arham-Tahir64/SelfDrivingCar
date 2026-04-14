@@ -92,7 +92,7 @@ class SegFormerDrivableExtractor:
         self._tick_counter += 1
         self._ran_inference_last_call = False
 
-        if self._tick_counter % self._run_every_n_ticks != 1:
+        if self._run_every_n_ticks > 1 and self._tick_counter % self._run_every_n_ticks != 1:
             if self._cached_result is not None:
                 return self._cached_result
 

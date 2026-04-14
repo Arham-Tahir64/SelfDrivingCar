@@ -114,9 +114,9 @@ def _resolve_perception_aux_policy(runtime_config) -> _PerceptionAuxPolicy:
                     enable_learned_lanes=False,
                     enable_depth=True,
                     allow_online_lane_training=False,
-                    segformer_run_every_n_ticks=10,
+                    segformer_run_every_n_ticks=1,
                     lane_run_every_n_ticks=10,
-                    depth_run_every_n_ticks=10,
+                    depth_run_every_n_ticks=1,
                     segformer_max_input_long_edge_px=512,
                 )
         elif policy_name == "balanced":
